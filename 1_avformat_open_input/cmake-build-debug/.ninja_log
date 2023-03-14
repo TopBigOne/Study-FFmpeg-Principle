@@ -1,0 +1,14 @@
+# ninja log v5
+7	62	1678770234489848380	1_avformat_open_input	b01405ccaea51526
+0	4	0	clean	3c8e6cc385ee00ba
+0	91	1678770269551987929	build.ninja	6625c78b8b774df4
+6	55	1678770158256647348	CMakeFiles/1_avformat_open_input.dir/main.c.o	ecff4a75d78b7547
+0	55	1678770269551987929	build.ninja	6625c78b8b774df4
+5	243	1678770269798111265	CMakeFiles/1_avformat_open_input.dir/main.c.o	ecff4a75d78b7547
+243	289	1678770269848166249	1_avformat_open_input	b01405ccaea51526
+1	50	1678770292131912125	CMakeFiles/1_avformat_open_input.dir/main.c.o	ecff4a75d78b7547
+50	83	1678770292165766073	1_avformat_open_input	b01405ccaea51526
+6	251	1678770361548341532	CMakeFiles/1_avformat_open_input.dir/main.c.o	ecff4a75d78b7547
+251	297	1678770361599734224	1_avformat_open_input	b01405ccaea51526
+1	242	1678770419327434143	CMakeFiles/1_avformat_open_input.dir/main.c.o	ecff4a75d78b7547
+242	288	1678770419377288210	1_avformat_open_input	b01405ccaea51526

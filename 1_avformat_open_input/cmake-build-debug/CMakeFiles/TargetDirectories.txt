@@ -1,0 +1,3 @@
+/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/1_avformat_open_input/cmake-build-debug/CMakeFiles/1_avformat_open_input.dir
+/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/1_avformat_open_input/cmake-build-debug/CMakeFiles/edit_cache.dir
+/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/1_avformat_open_input/cmake-build-debug/CMakeFiles/rebuild_cache.dir
