@@ -14,8 +14,8 @@ int main() {
         return 0;
     }
 
-   //  AVDictionary *avDictionary; //todo  这种写法，会报 EXC_BAD_ACCESS (code=1, address=0xb979000104d8eb74)
-     AVDictionary *avDictionary = NULL;
+    //  AVDictionary *avDictionary; //todo  这种写法，会报 EXC_BAD_ACCESS (code=1, address=0xb979000104d8eb74)
+    AVDictionary *avDictionary = NULL;
     // flags 是编码器的共有属性
     result = av_dict_set(&avDictionary, "flags", "unaligned", AV_DICT_MATCH_CASE);
     if (result < 0) {
@@ -37,12 +37,16 @@ int main() {
         return 0;
     }
 
+
     AVCodec *encodeCodec = avcodec_find_encoder(AV_CODEC_ID_H264);
+
     if (encodeCodec == NULL) {
         fprintf(stderr, " encodeCodec in ERROR");
         return 0;
     }
     AVCodecContext *codecContext = avcodec_alloc_context3(encodeCodec);
+    codecContext->time_base = avFormatContext->streams[0]->time_base;
+
     if (codecContext == NULL) {
         fprintf(stderr, " codecContext in ERROR");
         return 0;
