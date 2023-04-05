@@ -6,6 +6,8 @@
 #include <libavfilter/buffersrc.h>
 #include <libavfilter/buffersink.h>
 #include <libavutil/bprint.h>
+#include <libavdevice/avdevice.h>
+
 
 
 #define VIDEO_PATH "/Users/dev/Desktop/yuv_data/juren-30s.mp4"
@@ -31,6 +33,7 @@ int frame_num = 0;
 
 
 void free_all() {
+    // ff_android_camera_demuxer
     av_packet_free(&avPacket);
     av_frame_free(&avFrame);
     av_frame_free(&result_frame);
