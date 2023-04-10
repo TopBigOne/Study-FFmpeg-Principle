@@ -29,7 +29,7 @@ AVPacket *pkt_out = NULL;
 AVInputFormat *avInputFormat = NULL;
 
 // outcome video name
-char filename_out[] = "/Users/dev/Documents/GCC_Work/CPP/21-avio-main-luo/output/juren-30s-2.mp4";
+char filename_out[] = "/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/21-avio-main-luo/output/juren-30s-3.mp4";
 
 
 #define AVIO_BUFFER_SIZE 4096
@@ -96,7 +96,7 @@ static int64_t seek_in_buffer(void *opaque, int64_t offset, int whence) {
 void start_read_file() {
     puts("开始读取本地的mp4文件");
     uint8_t *input;
-    char    filename[] = "/Users/dev/Documents/GCC_Work/CPP/21-avio-main-luo/juren-30s.mp4";
+    char    filename[] = "/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/21-avio-main-luo/juren-30s.mp4";
     size_t  file_len;
     input = readFile(filename, &file_len);
     puts("为 BufferData 的属性赋值");
