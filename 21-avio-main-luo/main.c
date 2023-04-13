@@ -3,10 +3,10 @@
 
 #define MIN(a, b) (a<b)?a:b
 typedef struct _BufferData {
-    uint8_t *ptr; // 指向buffer数据中 "还没被io上下文消耗的位置"
-    uint8_t *ori_ptr; // 也是指向buffer数据的指针,之所以定义ori_ptr,是用在自定义seek函数中
-    size_t  size; // 视频buffer还没被消耗部分的大小,随着不断消耗,越来越小
-    size_t  file_size; //原始视频buffer的大小,也是用在自定义seek函数中
+    uint8_t *ptr;      // 指向buffer数据中 "还没被io上下文消耗的位置"
+    uint8_t *ori_ptr;   // 也是指向buffer数据的指针,之所以定义ori_ptr,是用在自定义seek函数中
+    size_t  size;       // 视频buffer还没被消耗部分的大小,随着不断消耗,越来越小
+    size_t  file_size;  //原始视频buffer的大小,也是用在自定义seek函数中
 } BufferData;
 
 
@@ -14,8 +14,8 @@ typedef struct _BufferData {
 BufferData      bd               = {0};
 AVCodecContext  *avctx           = NULL;
 uint8_t         *avio_ctx_buffer = NULL;
-AVIOContext     *avio_ctx        = NULL;
-AVFormatContext *fmt_ctx         = NULL;
+AVIOContext     *avio_ctx                = NULL;
+AVFormatContext *input_av_format_context = NULL;
 
 AVStream        *st          = NULL;
 AVFormatContext *fmt_ctx_out = NULL;
@@ -56,18 +56,27 @@ int init_avio_context();
 
 void print_avpacket_info(AVPacket *temp_packet);
 
-/* 读取 AVPacket 回调函数 */
-static int read_packet(void *opaque, uint8_t *buf, int buf_size) {
+/**
+ * 读取 AVPacket 回调函数
+ * @param opaque     原数据；
+ * @param des_buf
+ * @param buf_size
+ * @return
+ */
+static int read_packet(void *opaque, uint8_t *des_buf, int buf_size) {
+    puts("     read_packet ");
     BufferData *bd = (BufferData *) opaque;
-    buf_size = MIN((int) bd->size, buf_size);
+    //
+    buf_size = MIN((int) bd->size, buf_size); // buf_size : 4kb
 
-    // printf("buf pointer address is : %p \n", buf);
+    printf("     ***** des_buf pointer address is : %p \n", des_buf);
     if (!buf_size) {
         printf("no buf_size pass to read_packet,%d,%zu\n", buf_size, bd->size);
         return EAGAIN;
     }
-    //printf("ptr in file:%p io.buffer ptr:%p, size:%zu,buf_size:%d\n", bd->ptr, buf, bd->size, buf_size);
-    memcpy(buf, bd->ptr, buf_size);
+    //printf("ptr in file:%p io.buffer ptr:%p, size:%zu,buf_size:%d\n", bd->ptr, des_buf, bd->size, buf_size);
+    memcpy(des_buf, bd->ptr, buf_size);
+
     bd->ptr += buf_size;
     bd->size -= buf_size; // left size in buffer
     return buf_size;
@@ -78,7 +87,8 @@ static int64_t seek_in_buffer(void *opaque, int64_t offset, int whence) {
     BufferData *bd = (BufferData *) opaque;
     int64_t    ret = -1;
 
-    printf("whence=%d , offset=%lld , file_size=%zu\n", whence, offset, bd->file_size);
+
+    printf("    seek_in_buffer() : whence=%d , offset=%lld , file_size=%zu\n", whence, offset, bd->file_size);
     switch (whence) {
         case AVSEEK_SIZE:
             ret = bd->file_size;
@@ -94,10 +104,11 @@ static int64_t seek_in_buffer(void *opaque, int64_t offset, int whence) {
 
 
 void start_read_file() {
-    puts("开始读取本地的mp4文件");
+    puts("1:开始读取本地的mp4文件");
     uint8_t *input;
     char    filename[] = "/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/21-avio-main-luo/juren-30s.mp4";
     size_t  file_len;
+    // start ....
     input = readFile(filename, &file_len);
     puts("为 BufferData 的属性赋值");
     bd.ptr       = input;
@@ -107,58 +118,67 @@ void start_read_file() {
 }
 
 uint8_t *readFile(char *path, size_t *length) {
-    FILE    *pfile;
-    uint8_t *data;
+    FILE *pfile;
+
     pfile = fopen(path, "rb");
+
+    uint8_t *data; // todo ??
+
     if (pfile == NULL)
         return NULL;
     fseek(pfile, 0, SEEK_END);
+
+    // *length VS length
+
     *length = ftell(pfile);
+
     data = (uint8_t *) malloc((*length) * sizeof(uint8_t));
     rewind(pfile);
-    *length = fread(data, 1, *length, pfile);
+    //   uint8_t VS int
+    *length = fread(data, sizeof(uint8_t), *length, pfile);
     fclose(pfile);
+
     return data;
 }
 
 int init_input_ffmpeg() {
     int ret = -1;
-    puts("初始化 文件部分相关参数；");
+    puts("3: init_input_ffmpeg");
     //打开输入文件
-    fmt_ctx = avformat_alloc_context();
-    if (!fmt_ctx) {
+    input_av_format_context = avformat_alloc_context();
+    if (!input_av_format_context) {
         printf("error code %d \n", AVERROR(ENOMEM));
         return ENOMEM;
     }
 
-    init_avio_context();
-    //avio_ctx->seekable = 0;
-    fmt_ctx->pb = avio_ctx;
 
-    if ((ret = avformat_open_input(&fmt_ctx, NULL, avInputFormat, NULL)) < 0) {
+    //avio_ctx->seekable = 0;
+    input_av_format_context->pb = avio_ctx;
+
+    if ((ret = avformat_open_input(&input_av_format_context, NULL, avInputFormat, NULL)) < 0) {
         printf("can not open file %d \n", ret);
         return ret;
     }
-    double total_seconds = fmt_ctx->duration * av_q2d(AV_TIME_BASE_Q);
+    double total_seconds = input_av_format_context->duration * av_q2d(AV_TIME_BASE_Q);
     puts("|-----------------------------------------|");
-    printf("| 原始视频总时长为：%lld um\n", fmt_ctx->duration);
+    printf("| 原始视频总时长为：%lld um\n", input_av_format_context->duration);
     printf("| 原始视频总时长为：%f s\n", total_seconds);
     puts("|-----------------------------------------|\n");
-    AVRational video_time_base = fmt_ctx->streams[0]->time_base;
+    AVRational video_time_base = input_av_format_context->streams[0]->time_base;
 
     puts("|-----------------------------------------|");
     printf("| 原始视频 time_base-> num : %d \n", video_time_base.num);
     printf("| 原始视频 time_base-> den : %d \n", video_time_base.den);
     puts("|-----------------------------------------|\n");
 
-    ret = avformat_find_stream_info(fmt_ctx, NULL);
+    ret = avformat_find_stream_info(input_av_format_context, NULL);
     if (ret < 0) {
         printf("avformat find stream info failed: %d \n", ret);
         return ret;
     }
 
     avctx = avcodec_alloc_context3(NULL);
-    ret   = avcodec_parameters_to_context(avctx, fmt_ctx->streams[0]->codecpar);
+    ret   = avcodec_parameters_to_context(avctx, input_av_format_context->streams[0]->codecpar);
     if (ret < 0) {
         printf("error code %d \n", ret);
         return ret;
@@ -177,11 +197,11 @@ int init_input_ffmpeg() {
 
 
 int init_avio_context() {
-    puts("初始化 avio context.");
+    puts("2:  avio context.");
     avInputFormat = av_find_input_format("mp4");;
 
     avio_ctx_buffer = av_malloc(AVIO_BUFFER_SIZE);
-    printf("avio_ctx_buffer address is : %p \n", avio_ctx_buffer);
+    printf("    avio_ctx_buffer address is : %p \n", avio_ctx_buffer);
 
     if (!avio_ctx_buffer) {
         printf("error code %d \n", AVERROR(ENOMEM));
@@ -212,7 +232,7 @@ int init_output_ffmpeg() {
     //添加一路流到容器上下文
     st = avformat_new_stream(fmt_ctx_out, NULL);
     // 设置时间基
-    st->time_base = fmt_ctx->streams[0]->time_base;
+    st->time_base = input_av_format_context->streams[0]->time_base;
     pkt_out = av_packet_alloc();
     return result;
 }
@@ -249,12 +269,12 @@ int start_write_packet() {
     // 设置 AVPacket 的 stream_index ，这样才知道是哪个流的。
     pkt_out->stream_index = st->index;
     // 转换 AVPacket 的时间基为 输出流的时间基。
-    pkt_out->pts          = av_rescale_q_rnd(pkt_out->pts, fmt_ctx->streams[0]->time_base,
+    pkt_out->pts          = av_rescale_q_rnd(pkt_out->pts, input_av_format_context->streams[0]->time_base,
                                              st->time_base, AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
-    pkt_out->dts          = av_rescale_q_rnd(pkt_out->dts, fmt_ctx->streams[0]->time_base,
+    pkt_out->dts          = av_rescale_q_rnd(pkt_out->dts, input_av_format_context->streams[0]->time_base,
                                              st->time_base, AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
 
-    pkt_out->duration = av_rescale_q_rnd(pkt_out->duration, fmt_ctx->streams[0]->time_base,
+    pkt_out->duration = av_rescale_q_rnd(pkt_out->duration, input_av_format_context->streams[0]->time_base,
                                          st->time_base, AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
 
     print_avpacket_info(pkt);
@@ -294,9 +314,9 @@ int init_encode_context() {
      * 因为你解码出来的 AVFrame 可能会经过 filter 滤镜，经过滤镜之后信息就会变换，但是本文没有使用滤镜。
      */
     //编码器的时间基要取 AVFrame 的时间基，因为 AVFrame 是输入。AVFrame 的时间基就是 流的时间基。
-    enc_ctx->time_base              = fmt_ctx->streams[0]->time_base;
-    enc_ctx->width                  = fmt_ctx->streams[0]->codecpar->width;
-    enc_ctx->height                 = fmt_ctx->streams[0]->codecpar->height;
+    enc_ctx->time_base              = input_av_format_context->streams[0]->time_base;
+    enc_ctx->width                  = input_av_format_context->streams[0]->codecpar->width;
+    enc_ctx->height                 = input_av_format_context->streams[0]->codecpar->height;
     enc_ctx->sample_aspect_ratio    = st->sample_aspect_ratio = frame->sample_aspect_ratio;
     enc_ctx->pix_fmt                = frame->format;
     enc_ctx->color_range            = frame->color_range;
@@ -351,7 +371,7 @@ void free_all() {
     avcodec_close(enc_ctx);
 
     //释放容器内存。
-    avformat_free_context(fmt_ctx);
+    avformat_free_context(input_av_format_context);
     avformat_free_context(fmt_ctx_out);
 }
 
@@ -359,16 +379,18 @@ void free_all() {
 int main() {
     int ret = 0;
     start_read_file();
+    init_avio_context();
     init_input_ffmpeg();
 
     init_output_ffmpeg();
     int read_end = 0;
 
+    // level 1
     for (;;) {
         if (1 == read_end) {
             break;
         }
-        ret = av_read_frame(fmt_ctx, pkt);
+        ret = av_read_frame(input_av_format_context, pkt);
         //跳过不处理音频包
         if (1 == pkt->stream_index) {
             av_packet_unref(pkt);
@@ -399,6 +421,7 @@ int main() {
 
         // receive the frame;
         //循环不断从解码器读数据，直到没有数据可读。
+        // level 2
         for (;;) {
             // 读取 AVFrame
             ret = avcodec_receive_frame(avctx, frame);
@@ -413,7 +436,7 @@ int main() {
 
             // case 2:
             if (AVERROR_EOF == ret) {
-                ret = avcodec_send_frame(enc_ctx, NULL);
+                avcodec_send_frame(enc_ctx, NULL);
                 start_receive_packet();
                 av_write_trailer(fmt_ctx_out);
                 // 跳出 第二层 for，文件已经解码完毕。
@@ -432,6 +455,7 @@ int main() {
                     return ret;
                 }
 
+                // level 3
                 for (;;) {
                     ret = avcodec_receive_packet(enc_ctx, pkt_out);
                     if (ret == AVERROR(EAGAIN)) {
