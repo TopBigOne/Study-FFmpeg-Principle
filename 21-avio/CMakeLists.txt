@@ -7,7 +7,7 @@ set(FFMPEG_DIR /opt/homebrew/Cellar/ffmpeg/4.4.1_4)
 include_directories(${FFMPEG_DIR}/include/)
 link_directories(${FFMPEG_DIR}/lib)
 
-add_executable(21_avio main.c main_write.c)
+add_executable(21_avio main.c)
 
 target_link_libraries(
         21_avio

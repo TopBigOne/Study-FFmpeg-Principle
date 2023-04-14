@@ -937,6 +937,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame)
         return ret;
     }
 
+    // packet
     while (1) {
         ret = avcodec_receive_packet(enc, pkt);
         update_benchmark("%s_%s %d.%d", action, type_desc,
@@ -950,6 +951,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame)
             av_assert0(frame); // should never happen during flushing
             return 0;
         } else if (ret == AVERROR_EOF) {
+           //  写入输出文件
             output_packet(of, pkt, ost, 1);
             return ret;
         } else if (ret < 0) {
@@ -967,6 +969,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame)
                    av_ts2str(pkt->duration), av_ts2timestr(pkt->duration, &enc->time_base));
         }
 
+        // 用于将 AVPacket 中各种时间值从一种时间基转换为另一种时间基。
         av_packet_rescale_ts(pkt, enc->time_base, ost->mux_timebase);
 
         if (debug_ts) {
@@ -2398,7 +2401,15 @@ static int send_filter_eof(InputStream *ist)
     return 0;
 }
 
-/* pkt = NULL means EOF (needed to flush decoder buffers) */
+
+/**
+ * 处理输入的AVPacket
+ * pkt = NULL means EOF (needed to flush decoder buffers)
+ * @param ist
+ * @param pkt
+ * @param no_eof
+ * @return
+ */
 static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eof)
 {
     const AVCodecParameters *par = ist->par;
@@ -3157,6 +3168,14 @@ static int init_output_stream_encode(OutputStream *ost, AVFrame *frame)
     return 0;
 }
 
+/**
+ * 初始化输出流
+ * @param ost
+ * @param frame
+ * @param error
+ * @param error_len
+ * @return
+ */
 static int init_output_stream(OutputStream *ost, AVFrame *frame,
                               char *error, int error_len)
 {
@@ -3372,7 +3391,7 @@ static int transcode_init(void)
      *   known after the encoder is initialized.
      */
     for (i = 0; i < nb_output_streams; i++) {
-        if (output_streams[i]->enc_ctx &&
+        if (output_streams[i]->enc_ctx
             (output_streams[i]->st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ||
              output_streams[i]->st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO))
             continue;

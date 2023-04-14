@@ -26,7 +26,7 @@ AVFrame  *frame   = NULL;
 AVPacket *pkt_out = NULL;
 
 
-AVInputFormat *avInputFormat = NULL;
+
 
 // outcome video name
 char filename_out[] = "/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/21-avio-main-luo/output/juren-30s-3.mp4";
@@ -155,6 +155,9 @@ int init_input_ffmpeg() {
     //avio_ctx->seekable = 0;
     input_av_format_context->pb = avio_ctx;
 
+    AVInputFormat *avInputFormat = NULL;
+    avInputFormat = av_find_input_format("mp4");
+
     if ((ret = avformat_open_input(&input_av_format_context, NULL, avInputFormat, NULL)) < 0) {
         printf("can not open file %d \n", ret);
         return ret;
@@ -198,7 +201,7 @@ int init_input_ffmpeg() {
 
 int init_avio_context() {
     puts("2:  avio context.");
-    avInputFormat = av_find_input_format("mp4");;
+
 
     avio_ctx_buffer = av_malloc(AVIO_BUFFER_SIZE);
     printf("    avio_ctx_buffer address is : %p \n", avio_ctx_buffer);
