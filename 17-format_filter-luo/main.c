@@ -170,6 +170,7 @@ int main() {
                 }
 
                 ret = av_buffersink_get_frame_flags(resultsink_ctx, result_frame, AV_BUFFERSRC_FLAG_PUSH);
+
                 if (ret >= 0) {
                     result_fmt = av_pix_fmt_desc_get(result_frame->format);
                     printf("result frame fmt is %d,%s \n", result_frame->format, result_fmt->name);
