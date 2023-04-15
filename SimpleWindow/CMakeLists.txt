@@ -4,7 +4,7 @@ project(SimpleWindow C)
 set(CMAKE_C_STANDARD 99)
 
 
-set(SDL2_DIR /opt/homebrew/Cellar/sdl2/2.0.18/)
+set(SDL2_DIR /opt/homebrew/Cellar/sdl2/2.0.18)
 include_directories(${SDL2_DIR}/include/)
 link_directories(${SDL2_DIR}/lib/)
 
