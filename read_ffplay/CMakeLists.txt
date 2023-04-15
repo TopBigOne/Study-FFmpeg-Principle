@@ -3,22 +3,47 @@ project(read_ffplay C)
 
 set(CMAKE_C_STANDARD 99)
 
-set(FFMPEG_DIR /opt/homebrew/Cellar/ffmpeg/4.4.1_4)
-include_directories(${FFMPEG_DIR}/include/)
-link_directories(${FFMPEG_DIR}/lib)
+# FFmpeg
+set(ffmpeg_prefix "/usr/local/ffmpeg/4.4")
+set(ffmpeg_exec_prefix "${ffmpeg_prefix}")
+set(libdir "${ffmpeg_exec_prefix}/lib")
+set(FFMPEG_PREFIX "/usr/local/Cellar/ffmpeg/4.1.3")
+set(FFMPEG_EXEC_PREFIX "/usr/local/Cellar/ffmpeg/4.1.3")
+set(FFMPEG_LIBDIR "${ffmpeg_exec_prefix}/lib")
+set(FFMPEG_INCLUDE_DIRS "${ffmpeg_prefix}/include/")
+
+
+# SDL2
+set(prefix "/opt/homebrew/Cellar/sdl2/2.0.18")
+set(exec_prefix "${prefix}")
+set(libdir "${exec_prefix}/lib")
+set(SDL2_PREFIX "/usr/local/Cellar/sdl2/2.0.9_1")
+set(SDL2_EXEC_PREFIX "/usr/local/Cellar/sdl2/2.0.9_1")
+set(SDL2_LIBDIR "${exec_prefix}/lib")
+set(SDL2_INCLUDE_DIRS "${prefix}/include/SDL2")
+set(SDL2_LIBRARIES "-L${SDL2_LIBDIR}  -lSDL2")
+string(STRIP "${SDL2_LIBRARIES}" SDL2_LIBRARIES)
+
+include_directories(
+        ${FFMPEG_INCLUDE_DIRS}
+        ${SDL2_INCLUDE_DIRS}
+)
+
+
+link_directories(
+        ${FFMPEG_LIBDIR}
+        ${SDL2_LIBDIR}
+)
+set(SOURCE_FILES
+        config.h
+        cmdutils.h
+        cmdutils.c
+        ffplay.c
+        )
+
 
 add_executable(read_ffplay
-        ffmpeg.c ffmpeg.h
-        cmdutils.h cmdutils.c
-        sync_queue.h sync_queue.c
-        ffmpeg_opt.c
-        config.h
-        fopen_utf8.h
-        opt_common.h opt_common.c
-        config_components.h
-        my_fifo.h my_fifo.c
-        error.h error.c
-        )
+        ${SOURCE_FILES})
 
 target_link_libraries(
         read_ffplay
@@ -29,5 +54,6 @@ target_link_libraries(
         avdevice
         avfilter
         avformat
+        SDL2
 )
 

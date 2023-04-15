@@ -204,54 +204,88 @@ typedef struct Decoder {
 }               Decoder;
 
 typedef struct VideoState {
-    SDL_Thread      *read_tid;
-    AVInputFormat   *iformat;
-    int             abort_request;
-    int             force_refresh;
-    int             paused;
-    int             last_paused;
-    int             queue_attachments_req;
-    int             seek_req;
-    int             seek_flags;
+    // 读线程句柄
+    SDL_Thread    *read_tid;
+    // 指向demuxer，解复用器格式：dshow、flv
+    AVInputFormat *iformat;
+
+    // =1请求退出播放
+    int abort_request;
+    //=1需要刷新画面
+    int force_refresh;
+    //=1暂停，=0播放
+    int paused;
+    //保存暂停/播放状态
+    int last_paused;
+    //mp3、acc音频文件附带的专辑封面，所以需要注意的是音频文件不一定只存在音频流本身
+    int queue_attachments_req;
+    //标识一次seek请求
+    int seek_req;
+    // seek标志，按字节还是时间seek，诸如AVSEEK_BYTE等
+    int seek_flags;
+
+    //请求seek的目标位置（当前位置+增量）
     int64_t         seek_pos;
+    //本次seek的增量
     int64_t         seek_rel;
     int             read_pause_return;
+    //iformat的上下文
     AVFormatContext *ic;
     int             realtime;
 
-    Clock audclk;
-    Clock vidclk;
-    Clock extclk;
+    // 三种同步的时钟
+    Clock audclk; //音频时钟
+    Clock vidclk; //视频时钟
+    Clock extclk; //外部时钟
 
+    //视频frame队列
     FrameQueue pictq;
+    //字幕frame队列
     FrameQueue subpq;
+    //采样frame队列
     FrameQueue sampq;
 
+    // 音频解码器
     Decoder auddec;
+    //视频解码器
     Decoder viddec;
+    //字幕解码器
     Decoder subdec;
 
+    //音频流索引
     int audio_stream;
 
+    //音视频同步类型，默认audio master
     int av_sync_type;
 
-    double             audio_clock;
-    int                audio_clock_serial;
-    double             audio_diff_cum; /* used for AV difference average computation */
-    double             audio_diff_avg_coef;
-    double             audio_diff_threshold;
-    int                audio_diff_avg_count;
-    AVStream           *audio_st;
-    PacketQueue        audioq;
-    int                audio_hw_buf_size;
-    uint8_t            *audio_buf;
-    uint8_t            *audio_buf1;
-    unsigned int       audio_buf_size; /* in bytes */
-    unsigned int       audio_buf1_size;
-    int                audio_buf_index; /* in bytes */
-    int                audio_write_buf_size;
-    int                audio_volume;
-    int                muted;
+    //当前音频帧的pts+当前帧Duration
+    double audio_clock;
+    //播放序列，seek可改变此值
+    int    audio_clock_serial;
+    /* 以下四个参数，非audio master 同步方式使用*/
+    double audio_diff_cum; /* used for AV difference average computation */
+    double audio_diff_avg_coef;
+    double audio_diff_threshold;
+    int    audio_diff_avg_count;
+
+    // 音频流
+    AVStream     *audio_st;
+    // 音频pack额头队列
+    PacketQueue  audioq;
+    // sdl 音频缓冲区大小
+    int          audio_hw_buf_size;
+    // 指向需要重采样的数据
+    uint8_t      *audio_buf;
+    // 指向重采样以后得数据
+    uint8_t      *audio_buf1;
+    // 待播放的一帧音频数据（audio buf）大小
+    unsigned int audio_buf_size; /* in bytes */
+    unsigned int audio_buf1_size;
+    int          audio_buf_index; /* in bytes */
+    int          audio_write_buf_size;
+    int          audio_volume;
+    int          muted;
+
     struct AudioParams audio_src;
 #if CONFIG_AVFILTER
     struct AudioParams audio_filter_src;
@@ -493,6 +527,7 @@ static int packet_queue_init(PacketQueue *q) {
     return 0;
 }
 
+
 static void packet_queue_flush(PacketQueue *q) {
     MyAVPacketList pkt1;
 
@@ -507,6 +542,7 @@ static void packet_queue_flush(PacketQueue *q) {
     q->serial++;
     SDL_UnlockMutex(q->mutex);
 }
+
 
 static void packet_queue_destroy(PacketQueue *q) {
     packet_queue_flush(q);
@@ -581,9 +617,11 @@ static int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, S
 }
 
 static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
+    puts("decoder_decode_frame\n");
     int ret = AVERROR(EAGAIN);
 
     for (;;) {
+        //todo ?
         if (d->queue->serial == d->pkt_serial) {
             do {
                 if (d->queue->abort_request)
@@ -1512,8 +1550,7 @@ static double compute_target_delay(double delay, VideoState *is) {
         }
     }
 
-    av_log(NULL, AV_LOG_TRACE, "video: delay=%0.3f A-V=%f\n",
-           delay, -diff);
+    av_log(NULL, AV_LOG_TRACE, "video: delay=%0.3f A-V=%f\n", delay, -diff);
 
     return delay;
 }
@@ -1538,6 +1575,7 @@ static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial
 
 /* called to display each frame */
 static void video_refresh(void *opaque, double *remaining_time) {
+    puts("video_refresh()\n");
     VideoState *is = opaque;
     double     time;
 
@@ -1694,9 +1732,9 @@ static void video_refresh(void *opaque, double *remaining_time) {
                        is->video_st ? is->viddec.avctx->pts_correction_num_faulty_pts : 0);
 
             if (show_status == 1 && AV_LOG_INFO > av_log_get_level())
-                fprintf(stderr, "%s", buf.str);
+                fprintf(stderr, "%s\n", buf.str);
             else
-                av_log(NULL, AV_LOG_INFO, "%s", buf.str);
+                av_log(NULL, AV_LOG_INFO, "%s\n", buf.str);
 
             fflush(stderr);
             av_bprint_finalize(&buf, NULL);
@@ -2082,7 +2120,16 @@ static int audio_thread(void *arg) {
     return ret;
 }
 
+/**
+ * 开启线程，开始解码相关数据
+ * @param d
+ * @param fn
+ * @param thread_name
+ * @param arg
+ * @return
+ */
 static int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name, void *arg) {
+    av_log(NULL, AV_LOG_INFO, "%s : 开始解码.\n", thread_name);
     packet_queue_start(d->queue);
     d->decoder_tid = SDL_CreateThread(fn, thread_name, arg);
     if (!d->decoder_tid) {
@@ -2679,7 +2726,7 @@ static int stream_component_open(VideoState *is, int stream_index) {
                 is->auddec.start_pts    = is->audio_st->start_time;
                 is->auddec.start_pts_tb = is->audio_st->time_base;
             }
-            if ((ret = decoder_start(&is->auddec, audio_thread, "audio_decoder", is)) < 0)
+            if ((ret = decoder_start(&is->auddec, audio_thread, "audio_decoder_thread", is)) < 0)
                 goto out;
             SDL_PauseAudioDevice(audio_dev, 0);
             break;
@@ -2689,7 +2736,7 @@ static int stream_component_open(VideoState *is, int stream_index) {
 
             if ((ret = decoder_init(&is->viddec, avctx, &is->videoq, is->continue_read_thread)) < 0)
                 goto fail;
-            if ((ret = decoder_start(&is->viddec, video_thread, "video_decoder", is)) < 0)
+            if ((ret = decoder_start(&is->viddec, video_thread, "video_decoder_thread", is)) < 0)
                 goto out;
             is->queue_attachments_req = 1;
             break;
@@ -2699,7 +2746,7 @@ static int stream_component_open(VideoState *is, int stream_index) {
 
             if ((ret = decoder_init(&is->subdec, avctx, &is->subtitleq, is->continue_read_thread)) < 0)
                 goto fail;
-            if ((ret = decoder_start(&is->subdec, subtitle_thread, "subtitle_decoder", is)) < 0)
+            if ((ret = decoder_start(&is->subdec, subtitle_thread, "subtitle_decoder_thread", is)) < 0)
                 goto out;
             break;
         default:
@@ -3115,7 +3162,7 @@ static VideoState *stream_open(const char *filename, AVInputFormat *iformat) {
     is->audio_volume = startup_volume;
     is->muted        = 0;
     is->av_sync_type = av_sync_type;
-    is->read_tid     = SDL_CreateThread(read_thread, "read_thread", is);
+    is->read_tid     = SDL_CreateThread(read_thread, "哈哈_read_thread", is);
     if (!is->read_tid) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateThread(): %s\n", SDL_GetError());
         fail:
@@ -3693,6 +3740,7 @@ int main(int argc, char **argv) {
     show_banner(argc, argv, options);
 
     parse_options(NULL, argc, argv, options, opt_input_file);
+    av_log(NULL, AV_LOG_FATAL, "输入的文件路径: %s\n", input_filename);
 
     if (!input_filename) {
         show_usage();
@@ -3705,6 +3753,7 @@ int main(int argc, char **argv) {
     if (display_disable) {
         video_disable = 1;
     }
+    // todo 这里面的 或 运算 该怎么理解?
     flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER;
     if (audio_disable)
         flags &= ~SDL_INIT_AUDIO;
@@ -3737,7 +3786,7 @@ int main(int argc, char **argv) {
             flags |= SDL_WINDOW_BORDERLESS;
         else
             flags |= SDL_WINDOW_RESIZABLE;
-        window    = SDL_CreateWindow(program_name, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, default_width,
+        window    = SDL_CreateWindow(program_name, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, default_width,
                                      default_height, flags);
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
         if (window) {
