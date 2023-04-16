@@ -114,92 +114,160 @@ const int  program_birth_year = 2003;
 static unsigned sws_flags = SWS_BICUBIC;
 
 typedef struct MyAVPacketList {
+    // 解封装后的数据
     AVPacket *pkt;
+    // 播放序列
     int      serial;
 }               MyAVPacketList;
 
 typedef struct PacketQueue {
     AVFifoBuffer *pkt_list;
+    //包数量，也就是队列元素数量
     int          nb_packets;
+    // 队列所有元素的数据大小总和
     int          size;
+    //队列所有元素的数据播放持续时间 ？ todo : 是相加所得吗？
     int64_t      duration;
+    //用户退出请求标志 ： 只有 0 和 1 ，两个值；
     int          abort_request;
+    //播放序列号
     int          serial;
+    //用于维持PacketQueue的多线程安全
     SDL_mutex    *mutex;
+    // 用于读、写线程相互通知，
     SDL_cond     *cond;
 }               PacketQueue;
 
-#define VIDEO_PICTURE_QUEUE_SIZE 3
-#define SUBPICTURE_QUEUE_SIZE 16
-#define SAMPLE_QUEUE_SIZE 9
+#define VIDEO_PICTURE_QUEUE_SIZE 3 // 视频队列
+#define SUBPICTURE_QUEUE_SIZE 16 // 字幕队列
+#define SAMPLE_QUEUE_SIZE 9  // 采样队列
 #define FRAME_QUEUE_SIZE FFMAX(SAMPLE_QUEUE_SIZE, FFMAX(VIDEO_PICTURE_QUEUE_SIZE, SUBPICTURE_QUEUE_SIZE))
 
 typedef struct AudioParams {
+    //采样率
     int                 freq;
+    //通道数
     int                 channels;
+    //通道布局，如：2.1声道，5.1声道
     int64_t             channel_layout;
+    //音频采样格式，如：AV_SAMPLE_FMT_S16
     enum AVSampleFormat fmt;
+    //一个采样单元占用的字节数
     int                 frame_size;
+    //一秒时间的字节数
     int                 bytes_per_sec;
-}               AudioParams;
+} AudioParams;
 
+// Clock 时钟封装
 typedef struct Clock {
+    //时钟基础, 当前帧(待播放)显示时间戳，播放后,当前帧变成上一帧
     double pts;           /* clock base */
+    //当前pts与当前系统时钟的差值, audio、video对于该值是独立的
     double pts_drift;     /* clock base minus time at which we updated the clock */
+    //最后一次更新的系统时钟
     double last_updated;
+    //时钟速度控制，用于控制播放速度
     double speed;
+    // 播放序列，所谓播放序列就是一段连续的播放动作，一个seek操作会启动一段新的播放序列
     int    serial;           /* clock is based on a packet with this serial */
+    // = 1 说明是暂停状态
     int    paused;
+    //指向packet_serial  :obsolete(废弃的), detection: 检测
     int    *queue_serial;    /* pointer to the current packet queue serial, used for obsolete clock detection */
 }               Clock;
 
 /* Common struct for handling all types of decoded data and allocated render buffers. */
+// Frame是音频、视频、字幕通用的结构体，AVFrame是真正存储解码后的音视频数据，存储字幕使用AVSubtitle
 typedef struct Frame {
+    // 指向数据帧，音视频解码后的数据
     AVFrame    *frame;
+    // 用于字幕
     AVSubtitle sub;
+    //播放序列，在seek时serial会变化
     int        serial;
+    //时间戳，单位为秒
     double     pts;           /* presentation timestamp for the frame */
+
+    //该帧持续时间，单位为秒
     double     duration;      /* estimated duration of the frame */
+    //该帧在输入文件中的字节位置
     int64_t    pos;          /* byte position of the frame in the input file */
     int        width;
     int        height;
     int        format;
+    // sar： 横竖采样比
     AVRational sar;
+    //记录该帧是否已经显示过
     int        uploaded;
+    // 1旋转180，0正常播放
     int        flip_v;
 }               Frame;
 
+/**
+ * FrameQueue是一个环形缓冲区（ring buffer），是用数组实现的一个FIFO，
+ * ffplay中创建了音频frame_queue、视频frame_queue、字幕frame_queue，
+ * 每一个frame_queue都有一个写端和一个读端，
+ *  * 写端位于解码线程，
+ *  * 读端位于播放线程。
+ * FrameQueue操作提供以下方法：
+　　（a）frame_queue_unref_item：释放Frame⾥⾯的AVFrame和 AVSubtitle
+　　（b）frame_queue_init：初始化队列
+ */
 typedef struct FrameQueue {
+    //队列大小，数字太大时占用内存就会越大，需要注意设置
     Frame       queue[FRAME_QUEUE_SIZE];
+    //读索引，待播放时读取此帧进行播放，播放后此帧成为上一帧
     int         rindex;
+    //写索引
     int         windex;
+    //当前总帧数，todo ： 这个size 是 FrameQueue 的大小吗？ps: 这个大小是可变的。。。。
     int         size;
+    //可存储最大帧数，是一个定值；
     int         max_size;
+    //=1 说明要在队列里面保持最后一帧的数据不释放，只在销毁队列的时候才真正释放
+    // todo 为什么要keep last
     int         keep_last;
+    //初始化值为0，配合kepp_last=1使用
     int         rindex_shown;
     SDL_mutex   *mutex;
     SDL_cond    *cond;
+    // 数据包缓冲队列
     PacketQueue *pktq;
 }               FrameQueue;
 
 enum {
     AV_SYNC_AUDIO_MASTER, /* default choice */
-    AV_SYNC_VIDEO_MASTER,
+    AV_SYNC_VIDEO_MASTER,/*按照视频同步*/
     AV_SYNC_EXTERNAL_CLOCK, /* synchronize to an external clock */
 };
 
+/**
+ * Decoder 解码器封装
+ */
 typedef struct Decoder {
+    //packet缓存
     AVPacket       *pkt;
+    //packet队列，音频归音频、视频归视频的
     PacketQueue    *queue;
+    //解码器上下文
     AVCodecContext *avctx;
+    //包序列
     int            pkt_serial;
+    //=0解码器处理工作状态，!=0处于空闲状态
     int            finished;
+    //=0解码器处于异常状态，需要考虑重置解码器，=1解码器处于正常状态
     int            packet_pending;
+    // 检查到packet队列为空时,发送signal,缓存read_thread读取数据
     SDL_cond       *empty_queue_cond;
+    // 初始化时是stream的start_time
     int64_t        start_pts;
+    // 初始化时是stream的time_base
     AVRational     start_pts_tb;
+    //记录最近一次解码后的frame的pts
     int64_t        next_pts;
+    //next_pts的单位
     AVRational     next_pts_tb;
+    // 线程句柄
     SDL_Thread     *decoder_tid;
 }               Decoder;
 
@@ -280,53 +348,84 @@ typedef struct VideoState {
     uint8_t      *audio_buf1;
     // 待播放的一帧音频数据（audio buf）大小
     unsigned int audio_buf_size; /* in bytes */
+    // 申请到的音频缓冲区audio_buf1实际大小
     unsigned int audio_buf1_size;
-    int          audio_buf_index; /* in bytes */
-    int          audio_write_buf_size;
-    int          audio_volume;
-    int          muted;
 
+    //更新拷贝位置，当前音频帧中已拷贝入SDL音频缓冲区的位置索引
+    int audio_buf_index; /* in bytes */
+    //当前音频帧中尚未拷贝入SDL音频缓冲区的数据量
+    int audio_write_buf_size;
+    //音量
+    int audio_volume;
+    // =1静音，=0正常
+    int muted;
+
+
+    // 音频frame的参数
     struct AudioParams audio_src;
 #if CONFIG_AVFILTER
     struct AudioParams audio_filter_src;
 #endif
+    //SDL支持的音频参数，重采样转换
     struct AudioParams audio_tgt;
+    //音频重采样context
     struct SwrContext  *swr_ctx;
-    int                frame_drops_early;
-    int                frame_drops_late;
+
+    //丢弃视频packet计数
+    int         frame_drops_early;
+    //丢弃视频frame计数
+    int         frame_drops_late;
 
     enum ShowMode {
         SHOW_MODE_NONE = -1, SHOW_MODE_VIDEO = 0, SHOW_MODE_WAVES, SHOW_MODE_RDFT, SHOW_MODE_NB
-    }                  show_mode;
-    int16_t            sample_array[SAMPLE_ARRAY_SIZE];
-    int                sample_array_index;
-    int                last_i_start;
-    RDFTContext        *rdft;
-    int                rdft_bits;
-    FFTSample          *rdft_data;
-    int                xpos;
-    double             last_vis_time;
-    SDL_Texture        *vis_texture;
-    SDL_Texture        *sub_texture;
-    SDL_Texture        *vid_texture;
+    }           show_mode;
+    // 音频波形显示使用
+    int16_t     sample_array[SAMPLE_ARRAY_SIZE];
+    int         sample_array_index;
+    int         last_i_start;
+    RDFTContext *rdft;
+    int         rdft_bits;
+    FFTSample   *rdft_data;
+    int         xpos;
+    double      last_vis_time;
+    SDL_Texture *vis_texture;
+    // 字幕显示
+    SDL_Texture *sub_texture;
+    // 视频显示
+    SDL_Texture *vid_texture;
 
+    // 字幕流索引
     int         subtitle_stream;
+    //字幕流
     AVStream    *subtitle_st;
+    //字幕packet队列
     PacketQueue subtitleq;
 
-    double            frame_timer;
-    double            frame_last_returned_time;
-    double            frame_last_filter_delay;
-    int               video_stream;
-    AVStream          *video_st;
-    PacketQueue       videoq;
-    double            max_frame_duration;      // maximum duration of a frame - above this, we consider the jump a timestamp discontinuity
+    // 记录最后一帧播放时间
+    double frame_timer;
+    double frame_last_returned_time;
+    double frame_last_filter_delay;
+    //视频流索引
+    int    video_stream;
+
+    //视频流
+    AVStream    *video_st;
+    //视频packet队列
+    PacketQueue videoq;
+    // 一帧最大的间隔: 也表示 一帧画面，最大的持续时间
+    double      max_frame_duration;      // maximum duration of a frame - above this, we consider the jump a timestamp discontinuity
+
     struct SwsContext *img_convert_ctx;
+    // 字幕尺寸格式变换
     struct SwsContext *sub_convert_ctx;
+    //是否读取结束
     int               eof;
 
+    //文件名
     char *filename;
+    //宽，高，x起始坐标，y起始坐标
     int  width, height, xleft, ytop;
+    //=1步进播放模式，=0其他模式
     int  step;
 
 #if CONFIG_AVFILTER
@@ -338,8 +437,10 @@ typedef struct VideoState {
     AVFilterGraph   *agraph;              // audio filter graph
 #endif
 
+    // 保存最近的相应audio、video、subtitle流的stream_index
     int last_video_stream, last_audio_stream, last_subtitle_stream;
 
+    // 当读取线程队列满后进入休眠，可通过condition唤醒读取线程
     SDL_cond *continue_read_thread;
 }               VideoState;
 
@@ -458,25 +559,39 @@ int64_t get_valid_channel_layout(int64_t channel_layout, int channels) {
         return 0;
 }
 
+/**
+ * AVPacket 放进 PacketQueue 真正的实现
+ * @param q
+ * @param pkt
+ * @return
+ */
 static int packet_queue_put_private(PacketQueue *q, AVPacket *pkt) {
     MyAVPacketList pkt1;
 
     if (q->abort_request)
         return -1;
 
+    // 判断 AVFifoBuffer 里面还有多少内存空间可以写？
+    // 检查队列剩余空间是否 够用？
     if (av_fifo_space(q->pkt_list) < sizeof(pkt1)) {
+        // 不够用的话，扩容一个pkt1 大小；
         if (av_fifo_grow(q->pkt_list, sizeof(pkt1)) < 0)
             return -1;
     }
 
+    // 赋值操作
     pkt1.pkt    = pkt;
     pkt1.serial = q->serial;
 
+    // 往 AVFifoBuffer 里面写内存数据
     av_fifo_generic_write(q->pkt_list, &pkt1, sizeof(pkt1), NULL);
+    // 队列packet数量+1
     q->nb_packets++;
+    // 队列所有元素的数据大小总和 todo 这个计算方式，我有些不理解
     q->size += pkt1.pkt->size + sizeof(pkt1);
     q->duration += pkt1.pkt->duration;
     /* XXX: should duplicate packet data in DV case */
+    // 发出信号，表明当前队列中有数据了，通知等待中的读线程可以取数据了
     SDL_CondSignal(q->cond);
     return 0;
 }
@@ -485,29 +600,51 @@ static int packet_queue_put(PacketQueue *q, AVPacket *pkt) {
     AVPacket *pkt1;
     int      ret;
 
+    // 申请 avpacket 并做相关check
     pkt1 = av_packet_alloc();
     if (!pkt1) {
         av_packet_unref(pkt);
         return -1;
     }
+    // 将pkt 的值 转移到pkt1 中
     av_packet_move_ref(pkt1, pkt);
 
     SDL_LockMutex(q->mutex);
+    // 把 pkt1 放进 PacketQueue
     ret = packet_queue_put_private(q, pkt1);
     SDL_UnlockMutex(q->mutex);
 
+    // 哇哦，，sorry 添加队列的失败了
     if (ret < 0)
         av_packet_free(&pkt1);
 
     return ret;
 }
 
+/**
+ * NOTE：视频，音频，字符 会调用这个函数；
+ * 放入空包意味着流的结束，一般在媒体数据读取完成的时候放入空包；
+ * @param q
+ * @param pkt
+ * @param stream_index
+ * @return
+ */
 static int packet_queue_put_nullpacket(PacketQueue *q, AVPacket *pkt, int stream_index) {
+    // todo 看看pkt->data 是不是 为空
+    if (pkt->data == NULL) {
+        av_log(NULL, AV_LOG_INFO, " %d 流 放进一个空 packet", pkt->stream_index);
+    }
     pkt->stream_index = stream_index;
     return packet_queue_put(q, pkt);
 }
 
-/* packet queue handling */
+
+/**
+ * 初始化: packet queue handling
+ *
+ * @param q
+ * @return
+ */
 static int packet_queue_init(PacketQueue *q) {
     memset(q, 0, sizeof(PacketQueue));
     q->pkt_list = av_fifo_alloc(sizeof(MyAVPacketList));
@@ -528,14 +665,26 @@ static int packet_queue_init(PacketQueue *q) {
 }
 
 
+/**
+ * NOTE: 在媒体流数据读取完后，此时编码器还缓存有数据，把空节点（空的AVPacket）添加到链表，
+ * 解码线程把这空的AVPacket放入解码器，此时解码器就会认为是流结束，
+ * 会把缓存的所有frame都冲刷出来。
+ * ----------------------------------------------------------------------
+ * packet_queue_flush: 清除队列内所有的节点，包括节点对应的AVPacket，主要用于退出播放、seek播放。
+ * @param q
+ */
 static void packet_queue_flush(PacketQueue *q) {
     MyAVPacketList pkt1;
 
     SDL_LockMutex(q->mutex);
     while (av_fifo_size(q->pkt_list) >= sizeof(pkt1)) {
+        // 往 AVFifoBuffer 里面读内存数据：把 （buffer）q->pkt_list 的数据 读到 pkt1 中
+        // 实际，就是借用 AVPacket 释放buffer数据，这个十分巧妙，借刀杀人.....
         av_fifo_generic_read(q->pkt_list, &pkt1, sizeof(pkt1), NULL);
+        // free &pkt1.pkt
         av_packet_free(&pkt1.pkt);
     }
+    // 队列数据擦除
     q->nb_packets = 0;
     q->size       = 0;
     q->duration   = 0;
@@ -544,31 +693,56 @@ static void packet_queue_flush(PacketQueue *q) {
 }
 
 
+/**
+ * 销毁
+ * @param q
+ */
 static void packet_queue_destroy(PacketQueue *q) {
+    // 擦除度列数据
     packet_queue_flush(q);
     av_fifo_freep(&q->pkt_list);
     SDL_DestroyMutex(q->mutex);
     SDL_DestroyCond(q->cond);
 }
 
+/**
+ * 终止队列
+ * @param q
+ */
 static void packet_queue_abort(PacketQueue *q) {
     SDL_LockMutex(q->mutex);
 
+    // 请求退出
     q->abort_request = 1;
-
+    // 释放一个信号
     SDL_CondSignal(q->cond);
 
     SDL_UnlockMutex(q->mutex);
 }
 
+/**
+ * 启用
+ * @param q
+ */
 static void packet_queue_start(PacketQueue *q) {
+    // 线程安全
     SDL_LockMutex(q->mutex);
     q->abort_request = 0;
     q->serial++;
     SDL_UnlockMutex(q->mutex);
 }
 
-/* return < 0 if aborted, 0 if no packet and > 0 if packet.  */
+/**
+ *  获取一个节点: 重点看 *serial 是怎么被 赋值的？
+
+
+ * return < 0 if aborted, 0 if no packet and > 0 if packet.
+ * @param q
+ * @param pkt
+ * @param block  调⽤者是否需要 在没节点可取的情况下 阻塞等待
+ * @param serial  输出参数，即MyAVPacketList.serial
+ * @return
+ */
 static int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *serial) {
     MyAVPacketList pkt1;
     int            ret;
@@ -576,18 +750,25 @@ static int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *seria
     SDL_LockMutex(q->mutex);
 
     for (;;) {
-        if (q->abort_request) {
+        if (q->abort_request) {// abort_request 是 1 的话，就表示退出
             ret = -1;
+            // 退出loop
             break;
         }
 
         if (av_fifo_size(q->pkt_list) >= sizeof(pkt1)) {
             av_fifo_generic_read(q->pkt_list, &pkt1, sizeof(pkt1), NULL);
+            // 节点数 -1
             q->nb_packets--;
+            // cache 大小，扣除一个节点
             q->size -= pkt1.pkt->size + sizeof(pkt1);
+            // 总时长扣除一个节点的时长
             q->duration -= pkt1.pkt->duration;
+
+            // pkt 有值了，pkt1 的数据，被擦除了
             av_packet_move_ref(pkt, pkt1.pkt);
             if (serial)
+                // 在此给下一个节点赋值
                 *serial = pkt1.serial;
             av_packet_free(&pkt1.pkt);
             ret = 1;
@@ -596,6 +777,7 @@ static int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *seria
             ret = 0;
             break;
         } else {
+            // 这⾥没有break，for循环的另⼀个作⽤是在条件变量满⾜后重复上述代码取出节点
             SDL_CondWait(q->cond, q->mutex);
         }
     }
@@ -713,75 +895,146 @@ static void decoder_destroy(Decoder *d) {
     avcodec_free_context(&d->avctx);
 }
 
+/**
+ * // 释放对 vp->frame中的数据缓冲区AVBuffer的引⽤
+ * @param vp
+ */
 static void frame_queue_unref_item(Frame *vp) {
+    puts("释放对 vp->frame中的数据缓冲区AVBuffer的引⽤");
+    // 解去 frame 的引用
     av_frame_unref(vp->frame);
     avsubtitle_free(&vp->sub);
 }
 
+/**
+ * 初始化队列
+ * @param f
+ * @param pktq
+ * @param max_size
+ * @param keep_last
+ * @return
+ */
 static int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int keep_last) {
     int i;
     memset(f, 0, sizeof(FrameQueue));
+    // 创建 互斥锁
     if (!(f->mutex = SDL_CreateMutex())) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());
         return AVERROR(ENOMEM);
     }
+    // 创建 互斥条件
     if (!(f->cond  = SDL_CreateCond())) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateCond(): %s\n", SDL_GetError());
         return AVERROR(ENOMEM);
     }
     f->pktq        = pktq;
+    //队列大小
     f->max_size    = FFMIN(max_size, FRAME_QUEUE_SIZE);
-    f->keep_last   = !!keep_last;
+
+    // 将int取值的keep_last 转换 为bool取值（0或1）todo 神奇的代码.....
+    f->keep_last = !!keep_last;
+
     for (i = 0; i < f->max_size; i++)
+        // 为每一个节点的 AVFrame 分配内存，并不是缓存区的内存
         if (!(f->queue[i].frame = av_frame_alloc()))
             return AVERROR(ENOMEM);
     return 0;
 }
 
+/**
+ * 销毁队列
+ * @param f
+ */
 static void frame_queue_destory(FrameQueue *f) {
+    puts("销毁队列");
     int i;
     for (i = 0; i < f->max_size; i++) {
         Frame *vp = &f->queue[i];
+        // 俄罗斯套娃，，， ，内部肯定是free avFrame
         frame_queue_unref_item(vp);
+        // free avFrame.
         av_frame_free(&vp->frame);
     }
     SDL_DestroyMutex(f->mutex);
     SDL_DestroyCond(f->cond);
 }
 
+/**
+ *发送唤醒信号
+ * @param f
+ */
 static void frame_queue_signal(FrameQueue *f) {
+    puts("发送唤醒信号");
     SDL_LockMutex(f->mutex);
     SDL_CondSignal(f->cond);
     SDL_UnlockMutex(f->mutex);
 }
 
+/**
+ * 获取当前Frame，调⽤之前先调⽤frame_queue_nb_remaining确保有frame可读
+ * @param f
+ * @return
+ */
 static Frame *frame_queue_peek(FrameQueue *f) {
+    // todo 这个模运算是什么意思？ 是TM怕 数组越界？
     return &f->queue[(f->rindex + f->rindex_shown) % f->max_size];
 }
 
+/**
+ *：获取下⼀Frame
+ * NOTE:获取当前帧的下一帧，此时要确保queue里面至少有2个frame
+ * @param f
+ * @return
+ */
 static Frame *frame_queue_peek_next(FrameQueue *f) {
+    puts("获取下⼀Frame\n");
+   //  获取当前帧的下一帧，此时要确保queue里面至少有2个frame
+   // 靠，，，，这TM 不是队列，，，是直接操作数组，，好不好？
     return &f->queue[(f->rindex + f->rindex_shown + 1) % f->max_size];
 }
 
+/**
+ *获取上⼀Frame：
+ * NOTE： 队列，是先进先出的。
+ * @param f
+ * @return
+ */
 static Frame *frame_queue_peek_last(FrameQueue *f) {
     return &f->queue[f->rindex];
 }
 
+/**
+ * 获取可写帧，可以：以阻塞或⾮阻塞⽅式进⾏,
+ * NOTE:向队列尾部申请一个可写的帧空间，若队列已满无空间可写，
+ * 则等待（由SDL_cond *cond控制，由frame_queue_next或frame_queue_signal触发唤 醒）
+ * @param f
+ * @return
+ */
 static Frame *frame_queue_peek_writable(FrameQueue *f) {
     /* wait until we have space to put a new frame */
     SDL_LockMutex(f->mutex);
-    while (f->size >= f->max_size &&
-           !f->pktq->abort_request) {
+    while (f->size >= f->max_size && // 当前总帧数 >=可存储最大帧数
+           !f->pktq->abort_request) // 用户没有退出请求
+    {
+        // wo TM 等....等FrameQueue 的 queue 被消耗一些....
         SDL_CondWait(f->cond, f->mutex);
     }
     SDL_UnlockMutex(f->mutex);
 
+    // 用户退出了，直接返回NULL
     if (f->pktq->abort_request)
         return NULL;
-
+    // 从队列中返回一个可写的Frame
+    // 注意： 是队尾...是队尾...是队尾
     return &f->queue[f->windex];
 }
 
+/**
+ * 获取⼀个可读Frame，可以以阻塞或⾮阻塞⽅式进⾏
+ * NOTE:从队列头部读取一帧，只读取不删除，若无帧可读则等待
+ * @param f
+ * @return
+ */
 static Frame *frame_queue_peek_readable(FrameQueue *f) {
     /* wait until we have a readable a new frame */
     SDL_LockMutex(f->mutex);
@@ -797,35 +1050,58 @@ static Frame *frame_queue_peek_readable(FrameQueue *f) {
     return &f->queue[(f->rindex + f->rindex_shown) % f->max_size];
 }
 
+/**
+ * 更新写索引，此时Frame才真正⼊队列，队列节点Frame个数加1
+ * 向队列尾部压入一帧，只更新计数与写指针，因此条用此函数前，应将帧数据写入队列相应位置，
+ * SDL_CondSignal唤醒读frame_queue_peek_readable
+ *
+ * @param f
+ */
 static void frame_queue_push(FrameQueue *f) {
     if (++f->windex == f->max_size)
+        // 世界是一个圆，我又回到了最初的起点....
         f->windex = 0;
     SDL_LockMutex(f->mutex);
-    f->size++;
-    SDL_CondSignal(f->cond);
+    f->size++;// 当前总帧数 + 1 todo 需要看看 这个size 在哪里被使用
+    SDL_CondSignal(f->cond);//当frame_queue_peek_readable在等待时，可唤醒
     SDL_UnlockMutex(f->mutex);
 }
 
+/**
+ * 更新读索引，此时Frame才真正出队列，队列节点Frame个数减1
+ * case 1: 当启用keep_last时，如果rindex_shown为0则将其设置为1，并返回；
+ * case 2: 此时并不会更新读索引，也就是说keep_last机制实质上也会占用着队列的大小，
+ * case 3: 当调用frame_queue_nb_remaining获取size时并不能将其计算入size；释放Frame对应的数据，
+ * 但不释放Frame节点本身；更新读索引；释放唤醒信号，以环形正在等待写入的线程。
+ * @param f
+ */
 static void frame_queue_next(FrameQueue *f) {
     if (f->keep_last && !f->rindex_shown) {
         f->rindex_shown = 1;
         return;
     }
+    // 删除frame
     frame_queue_unref_item(&f->queue[f->rindex]);
+    // 世界还是一个圆，可读index回到当初变成0；
     if (++f->rindex == f->max_size)
         f->rindex = 0;
     SDL_LockMutex(f->mutex);
-    f->size--;
+    f->size--;// 当前总帧数 -1;PS : frame 出列了，所以总帧数要减 1 啊....
     SDL_CondSignal(f->cond);
     SDL_UnlockMutex(f->mutex);
 }
 
-/* return the number of undisplayed frames in the queue */
+/*
+ * 获取队列剩余大小
+ * return the number of undisplayed frames in the queue
+ * */
 static int frame_queue_nb_remaining(FrameQueue *f) {
     return f->size - f->rindex_shown;
 }
 
-/* return last shown position */
+/*
+ * 获取最近播放Frame对应数据在媒体⽂件的位置，主要在seek时使⽤
+ * return last shown position */
 static int64_t frame_queue_last_pos(FrameQueue *f) {
     Frame *fp = &f->queue[f->rindex];
     if (f->rindex_shown && fp->serial == f->pktq->serial)
@@ -1573,7 +1849,10 @@ static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial
     sync_clock_to_slave(&is->extclk, &is->vidclk);
 }
 
-/* called to display each frame */
+/*
+ * 读队列用法
+ * called to display each frame
+ * */
 static void video_refresh(void *opaque, double *remaining_time) {
     puts("video_refresh()\n");
     VideoState *is = opaque;
@@ -1595,54 +1874,81 @@ static void video_refresh(void *opaque, double *remaining_time) {
 
     if (is->video_st) {
         retry:
+        // 帧队列是否为空
         if (frame_queue_nb_remaining(&is->pictq) == 0) {
             // nothing to do, no picture to display in the queue
+            // 队列中没有图像可显示
         } else {
             double last_duration, duration, delay;
             Frame  *vp, *lastvp;
 
             /* dequeue the picture */
+            // 从队列取出上一个Frame
             lastvp = frame_queue_peek_last(&is->pictq);
+            // 读取待显示帧
             vp     = frame_queue_peek(&is->pictq);
 
             if (vp->serial != is->videoq.serial) {
+                // 如果不是最新的播放序列，则将其出队列，以尽快读取最新序列的帧
                 frame_queue_next(&is->pictq);
                 goto retry;
             }
 
             if (lastvp->serial != vp->serial)
+                // 新的播放序列重置当前时间
                 is->frame_timer = av_gettime_relative() / 1000000.0;
 
-            if (is->paused)
+            if (is->paused) {
                 goto display;
+                printf("视频暂停is->paused");
+            }
+
 
             /* compute nominal last_duration */
+            //last_duration 计算上一帧应显示的时长
             last_duration = vp_duration(is, lastvp, vp);
+            // 经过compute_target_delay方法，计算出待显示帧vp需要等待的时间
+            // case 1 : 如果以video同步，则delay直接等于last_duration。
+            // case 2 : 如果以audio或外部时钟同步，则需要比对 主时钟调整待显示帧vp要等待的时间。
             delay         = compute_target_delay(last_duration, is);
 
             time                = av_gettime_relative() / 1000000.0;
-            if (time < is->frame_timer + delay) {
+            // is->frame_timer 实际上就是上一帧last vp的播放时间,(vp 是 Frame)
+            // is->frame_timer + delay 是待显示帧vp该播放的时间
+            if (time < (is->frame_timer + delay)) { //判断是否继续显示上一帧
+                // 当前系统时刻还未到达上一帧的结束时刻，那么还应该继续显示上一帧。
+                // 计算出最小等待时间
                 *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
                 goto display;
             }
-
-            is->frame_timer += delay;
+            // 走到这一步，说明已经到了或过了该显示的时间，待显示帧vp的状态变更为当前要显示的帧
+            is->frame_timer += delay;// 更新当前帧播放的时间
             if (delay > 0 && time - is->frame_timer > AV_SYNC_THRESHOLD_MAX)
-                is->frame_timer = time;
+                is->frame_timer = time;// 如果和系统时间差距太大，就纠正为系统时间 todo 这TM 怎么纠正？
 
             SDL_LockMutex(is->pictq.mutex);
-            if (!isnan(vp->pts))
+            if (!isnan(vp->pts)) {
+                // 更新video时钟
                 update_video_pts(is, vp->pts, vp->pos, vp->serial);
-            SDL_UnlockMutex(is->pictq.mutex);
+            }
 
-            if (frame_queue_nb_remaining(&is->pictq) > 1) {
+            SDL_UnlockMutex(is->pictq.mutex);
+            // 丢帧逻辑
+            if (frame_queue_nb_remaining(&is->pictq) > 1) {// 有nextvp才会检测是否该丢帧
                 Frame *nextvp = frame_queue_peek_next(&is->pictq);
                 duration = vp_duration(is, vp, nextvp);
-                if (!is->step && (framedrop > 0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) &&
-                    time > is->frame_timer + duration) {
-                    is->frame_drops_late++;
-                    frame_queue_next(&is->pictq);
-                    goto retry;
+                if (!is->step    // 非逐帧模式才检测是否需要丢帧 is->step==1 为逐帧播放
+                    && (framedrop > 0 // cpu解帧过慢
+                        || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) // 非视频同步方式
+                    && time > is->frame_timer + duration // 确实落后了一帧数据
+                        ) {
+                    // todo __FUNCTION__ 和 __LINE__ 的用法，我忘记了。。。。__LINE__ 是代码行数
+                    printf("%s(%d) dif:%lfs, drop frame\n", __FUNCTION__, __LINE__,
+                           (is->frame_timer + duration) - time);
+                    is->frame_drops_late++;// 统计丢帧情况
+                    frame_queue_next(&is->pictq); // 这里实现真正的丢帧
+                    //(这里不能直接while丢帧，因为很可能audio clock重新对时了，这样delay值需要重新计算)
+                    goto retry;//回到函数开始位置，继续重试
                 }
             }
 
@@ -1680,7 +1986,9 @@ static void video_refresh(void *opaque, double *remaining_time) {
                 }
             }
 
+            //  当前vp帧出队列
             frame_queue_next(&is->pictq);
+            /* 说明需要刷新视频帧 */
             is->force_refresh = 1;
 
             if (is->step && !is->paused)
@@ -1689,7 +1997,7 @@ static void video_refresh(void *opaque, double *remaining_time) {
         display:
         /* display picture */
         if (!display_disable && is->force_refresh && is->show_mode == SHOW_MODE_VIDEO && is->pictq.rindex_shown)
-            video_display(is);
+            video_display(is);// 重点是显示
     }
     is->force_refresh = 0;
     if (show_status) {
@@ -1744,6 +2052,17 @@ static void video_refresh(void *opaque, double *remaining_time) {
     }
 }
 
+
+/**
+ * 写队列用法
+ * @param is
+ * @param src_frame
+ * @param pts
+ * @param duration
+ * @param pos
+ * @param serial
+ * @return
+ */
 static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double duration, int64_t pos, int serial) {
     Frame *vp;
 
@@ -1752,9 +2071,15 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
            av_get_picture_type_char(src_frame->pict_type), pts);
 #endif
 
-    if (!(vp = frame_queue_peek_writable(&is->pictq)))
+    // //检测队列可写，获取可写Frame指针
+    if (!(vp = frame_queue_peek_writable(&is->pictq))) {
+        perror("队列已满.");
         return -1;
+    }
 
+
+    // 开始对可写的Frame赋值
+    // NOTE: 采样比
     vp->sar      = src_frame->sample_aspect_ratio;
     vp->uploaded = 0;
 
@@ -1767,9 +2092,13 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
     vp->pos      = pos;
     vp->serial   = serial;
 
+    // 设置窗口大小
     set_default_window_size(vp->width, vp->height, vp->sar);
 
+
+    // 将src_frame中所有数据拷贝到vp->frame
     av_frame_move_ref(vp->frame, src_frame);
+    //更新写索引位置
     frame_queue_push(&is->pictq);
     return 0;
 }
