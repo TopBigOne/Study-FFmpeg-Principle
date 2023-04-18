@@ -75,7 +75,8 @@ AVDictionary *format_opts, *codec_opts, *resample_opts;
 
 static FILE *report_file;
 static int report_file_level = AV_LOG_DEBUG;
-int hide_banner = 0;
+// 隐藏
+int hide_banner = 1;
 
 enum show_muxdemuxers {
     SHOW_DEFAULT,
@@ -383,6 +384,7 @@ int parse_option(void *optctx, const char *opt, const char *arg,
 void parse_options(void *optctx, int argc, char **argv, const OptionDef *options,
                    void (*parse_arg_function)(void *, const char*))
 {
+    puts("解析命令行参数");
     const char *opt;
     int optindex, handleoptions = 1, ret;
 
