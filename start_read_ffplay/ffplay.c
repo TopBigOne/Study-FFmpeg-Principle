@@ -258,27 +258,39 @@ enum {
  * Decoder 解码器封装
  */
 typedef struct Decoder {
-    //packet缓存
+    // 要进行解码的 AVPacket，也是要发送给解码器的 AVPacket
+    // 这个实际上就是从 AVPacket 队列拿出来的。然后把这个 pkt 发送给解码器，
+    // 如果发送成功，那当然是 unref 这个 pkt，但是如果发送给解码器失败，
+    // 就会把 packet_pending 置为1，pkt 不进行 unref，下次再继续发送。
     AVPacket       *pkt;
-    //packet队列，音频归音频、视频归视频的
+    // AVPacket 队列，音频归音频、视频归视频的,用 AVFifoBuffer  实现的。
     PacketQueue    *queue;
-    //解码器上下文
+    // 解码器上下文
     AVCodecContext *avctx;
     //包序列
     int            pkt_serial;
+
+    // 已完成的时候，finished 等于上面的 pkt_serial。
+    // 当 buffersink 输出 EOF 的时候就是已完成。
     //=0解码器处理工作状态，!=0处于空闲状态
-    int            finished;
+    int finished;
+
+    // //代表上一个 AVPacket 已经从队列取出来了，但是未发送成功给解码器。
+    // 未发生成功的会保留在第一个字段 pkt 里面，下次会直接发送，不从队列取。
     //=0解码器处于异常状态，需要考虑重置解码器，=1解码器处于正常状态
-    int            packet_pending;
+    int packet_pending;
+
+    //条件变量，AVPacket 队列已经没有数据的时候会激活这个条件变量。
     // 检查到packet队列为空时,发送signal,缓存 read_thread 读取数据
     SDL_cond       *empty_queue_cond;
-    // 初始化时是stream的start_time
+    // 流的第一帧的pts
     int64_t        start_pts;
-    // 初始化时是stream的time_base
+    // 流的第一帧的pts的时间基
     AVRational     start_pts_tb;
-    //记录最近一次解码后的frame的pts
+    // 下一帧的pts，只有音频用到这个 next_pts 字段
+    // next_pts 的计算规则就是上一帧的 pts 加上他的样本数（也就是播放多久）
     int64_t        next_pts;
-    //next_pts的单位
+    // 下一帧的pts的时间基
     AVRational     next_pts_tb;
     // 线程句柄
     SDL_Thread     *decoder_tid;
@@ -806,6 +818,14 @@ static int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *seria
     return ret;
 }
 
+/**
+ *
+ * @param d
+ * @param avctx
+ * @param queue
+ * @param empty_queue_cond :  实际上就是 continue_read_thread，只是换了个名字。
+ * @return
+ */
 static int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, SDL_cond *empty_queue_cond) {
     memset(d, 0, sizeof(Decoder));
     d->pkt = av_packet_alloc();
@@ -857,6 +877,7 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                             else if (d->next_pts != AV_NOPTS_VALUE)
                                 frame->pts = av_rescale_q(d->next_pts, d->next_pts_tb, tb);
                             if (frame->pts != AV_NOPTS_VALUE) {
+                               //  next_pts 的计算规则就是上一帧的 pts 加上他的样本数（也就是播放多久）
                                 d->next_pts    = frame->pts + frame->nb_samples;
                                 d->next_pts_tb = tb;
                             }
@@ -913,6 +934,8 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
             if (avcodec_send_packet(d->avctx, d->pkt) == AVERROR(EAGAIN)) {
                 av_log(d->avctx, AV_LOG_ERROR,
                        "Receive_frame and send_packet both returned EAGAIN, which is an API violation.\n");
+
+                // 发送 pkt 失败，下次再次发送....
                 d->packet_pending = 1;
             } else {
                 av_packet_unref(d->pkt);
@@ -2314,14 +2337,15 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
 
 static int configure_audio_filters(VideoState *is, const char *afilters, int force_output_format) {
     static const enum AVSampleFormat sample_fmts[]           = {AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE};
-    int                              sample_rates[2]         = {0, -1};
-    int64_t                          channel_layouts[2]      = {0, -1};
-    int                              channels[2]             = {0, -1};
-    AVFilterContext                  *filt_asrc              = NULL, *filt_asink = NULL;
-    char                             aresample_swr_opts[512] = "";
-    AVDictionaryEntry                *e                      = NULL;
-    char                             asrc_args[256];
-    int                              ret;
+
+    int               sample_rates[2]         = {0, -1};
+    int64_t           channel_layouts[2]      = {0, -1};
+    int               channels[2]             = {0, -1};
+    AVFilterContext   *filt_asrc              = NULL, *filt_asink = NULL;
+    char              aresample_swr_opts[512] = "";
+    AVDictionaryEntry *e                      = NULL;
+    char              asrc_args[256];
+    int               ret;
 
     avfilter_graph_free(&is->agraph);
     if (!(is->agraph       = avfilter_graph_alloc()))
@@ -2489,7 +2513,7 @@ static int audio_thread(void *arg) {
  * @return
  */
 static int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name, void *arg) {
-    av_log(NULL, AV_LOG_INFO, "%s : 开始解码.\n", thread_name);
+    av_log(NULL, AV_LOG_INFO, "%s : 开启 SDL 解码线程.\n", thread_name);
     packet_queue_start(d->queue);
     d->decoder_tid = SDL_CreateThread(fn, thread_name, arg);
     if (!d->decoder_tid) {
@@ -2825,6 +2849,7 @@ static int audio_decode_frame(VideoState *is) {
 
 /* prepare a new audio buffer */
 static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
+    puts("    sdl_audio_callback()");
     VideoState *is = opaque;
     int        audio_size, len1;
 
@@ -2869,16 +2894,30 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
     }
 }
 
+/**
+ * 调 SDL_OpenAudioDevice() 打开音频设备
+ * NOTE: fplay 有两个处理音频的地方，一个是 滤镜（is->agraph），一个是重采样（is->swr_ctx）
+ * @param opaque
+ * @param wanted_channel_layout
+ * @param wanted_nb_channels
+ * @param wanted_sample_rate
+ * @param audio_hw_params
+ * @return
+ */
 static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb_channels, int wanted_sample_rate,
                       struct AudioParams *audio_hw_params) {
+    puts("    audio_open() : 调 SDL_OpenAudioDevice() 打开音频设备");
     SDL_AudioSpec    wanted_spec, spec;
     const char       *env;
     static const int next_nb_channels[]   = {0, 0, 1, 6, 2, 6, 4, 6};
     static const int next_sample_rates[]  = {0, 44100, 48000, 96000, 192000};
-    int              next_sample_rate_idx = FF_ARRAY_ELEMS(next_sample_rates) - 1;
+    // 取 index=4的采样率
+    int next_sample_rate_idx = FF_ARRAY_ELEMS(next_sample_rates) - 1;
+    printf("next_sample_rate_idx : %d", next_sample_rate_idx);
 
-    env                = SDL_getenv("SDL_AUDIO_CHANNELS");
+    env = SDL_getenv("SDL_AUDIO_CHANNELS");
     if (env) {
+        // atoi() : 把参数 str 所指向的字符串转换为一个整数（类型为 int 型
         wanted_nb_channels    = atoi(env);
         wanted_channel_layout = av_get_default_channel_layout(wanted_nb_channels);
     }
@@ -2894,6 +2933,7 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
         return -1;
     }
     while (next_sample_rate_idx && next_sample_rates[next_sample_rate_idx] >= wanted_spec.freq)
+        // 倒序
         next_sample_rate_idx--;
     wanted_spec.format   = AUDIO_S16SYS;
     wanted_spec.silence  = 0;
@@ -2946,7 +2986,15 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
     return spec.size;
 }
 
-/* open a given stream. Return 0 if OK */
+
+/**
+ * stream_component_open() 函数主要作用是打开 音频流或者视频流 对应的解码器，
+ * 开启解码线程去解码。
+ * open a given stream. Return 0 if OK
+ * @param is
+ * @param stream_index  是 数据流 的索引值
+ * @return
+ */
 static int stream_component_open(VideoState *is, int stream_index) {
     AVFormatContext   *ic                = is->ic;
     AVCodecContext    *avctx;
@@ -2971,10 +3019,15 @@ static int stream_component_open(VideoState *is, int stream_index) {
     ret = avcodec_parameters_to_context(avctx, ic->streams[stream_index]->codecpar);
     if (ret < 0)
         goto fail;
+    // 设置容器的time_base
     avctx->pkt_timebase = ic->streams[stream_index]->time_base;
 
+    // 查询解码器
     codec = avcodec_find_decoder(avctx->codec_id);
 
+    // forced_codec_name : 是指，外部，指定了编解码器；
+    // 如: ffplay -c:v openh264 juren.mp4
+    // 注意:
     switch (avctx->codec_type) {
         case AVMEDIA_TYPE_AUDIO   :
             is->last_audio_stream = stream_index;
@@ -3027,6 +3080,8 @@ static int stream_component_open(VideoState *is, int stream_index) {
     if (fast)
         avctx->flags2 |= AV_CODEC_FLAG2_FAST;
 
+    // 这个函数实际上就是把命令行参数的相关参数提取出来。
+
     opts = filter_codec_opts(codec_opts, avctx->codec_id, ic, ic->streams[stream_index], codec);
     if (!av_dict_get(opts, "threads", NULL, 0))
         av_dict_set(&opts, "threads", "auto", 0);
@@ -3041,21 +3096,31 @@ static int stream_component_open(VideoState *is, int stream_index) {
         goto fail;
     }
 
-    is->eof                            = 0;
+    is->eof = 0;
+    // 把流属性设置为不丢弃
     ic->streams[stream_index]->discard = AVDISCARD_DEFAULT;
+
+    // 对 音频，视频，字幕做了区别处理
     switch (avctx->codec_type) {
         case AVMEDIA_TYPE_AUDIO:
-#if CONFIG_AVFILTER
+#if CONFIG_AVFILTER // 判断是否启用 滤镜模块?
         {
+            // NOTE: fplay 有两个处理音频的地方，一个是 滤镜（is->agraph），一个是重采样（is->swr_ctx）
             AVFilterContext *sink;
 
             is->audio_filter_src.freq           = avctx->sample_rate;
             is->audio_filter_src.channels       = avctx->channels;
             is->audio_filter_src.channel_layout = get_valid_channel_layout(avctx->channel_layout, avctx->channels);
             is->audio_filter_src.fmt            = avctx->sample_fmt;
+
+            // 搞好了 is->in_audio_filter 跟 is->out_audio_filter 两个滤镜
+            // 然后播放的时候，需要从 out_audio_filter 读取 AVFrame。
             if ((ret       = configure_audio_filters(is, afilters, 0)) < 0)
                 goto fail;
             sink           = is->out_audio_filter;
+
+            // 调用实际上就是从 buffsink 出口滤镜里面获取到最后的音频信息。
+            // 要不然，参数都是 sink ？
             sample_rate    = av_buffersink_get_sample_rate(sink);
             nb_channels    = av_buffersink_get_channels(sink);
             channel_layout = av_buffersink_get_channel_layout(sink);
@@ -3067,10 +3132,15 @@ static int stream_component_open(VideoState *is, int stream_index) {
 #endif
 
             /* prepare audio output */
+            // 调 SDL_OpenAudioDevice() 打开音频设备
             if ((ret = audio_open(is, channel_layout, nb_channels, sample_rate, &is->audio_tgt)) < 0)
                 goto fail;
             is->audio_hw_buf_size = ret;
-            is->audio_src         = is->audio_tgt;
+            // is->audio_src: 存储的其实是 buffersink 出口滤镜的音频格式，
+            // 但是因为出口滤镜的音频格式可能跟 is->audio_tgt 本身是一样的，
+            // 所以就这样写了：is->audio_src         = is->audio_tgt;
+            // 采样率等信息，就放在 is->audio_tgt 变量返回。
+            is->audio_src         = is->audio_tgt;// AudioParams
             is->audio_buf_size    = 0;
             is->audio_buf_index   = 0;
 
