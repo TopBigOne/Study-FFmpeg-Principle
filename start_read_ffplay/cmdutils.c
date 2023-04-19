@@ -2108,9 +2108,19 @@ int check_stream_specifier(AVFormatContext *s, AVStream *st, const char *spec)
     return ret;
 }
 
+/**
+ * 把命令行参数的相关参数提取出
+ * @param opts
+ * @param codec_id
+ * @param s
+ * @param st
+ * @param codec
+ * @return
+ */
 AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
                                 AVFormatContext *s, AVStream *st, const AVCodec *codec)
 {
+    puts("      filter_codec_opts() : 把命令行参数的相关参数提取出");
     AVDictionary    *ret = NULL;
     AVDictionaryEntry *t = NULL;
     int            flags = s->oformat ? AV_OPT_FLAG_ENCODING_PARAM
