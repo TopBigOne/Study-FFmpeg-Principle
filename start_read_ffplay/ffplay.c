@@ -121,21 +121,33 @@ typedef struct MyAVPacketList {
 }               MyAVPacketList;
 
 typedef struct PacketQueue {
+    // 存储的是 MyAVPacketList
     AVFifoBuffer *pkt_list;
-    //包数量，也就是队列元素数量
+    //包数量，代表队列里面有多少个 AVPacket。
     int          nb_packets;
-    // 队列所有元素的数据大小总和
+    // 队列所有元素的 数据大小总和:算法是所有的 AVPacket 本身的大小 加上 AVPacket->size
     int          size;
-    //队列所有元素的数据播放持续时间 ？ todo : 是相加所得吗？
+    //队列所有元素的数据播放持续时间 ？ 通过累加 队列里所有的 AVPacket->duration 得到。
     int64_t      duration;
     // 用户退出请求标志 ： 只有 0 和 1 ，两个值；
     // audio_thread() 跟 video_thread() 解码线程就会退出
     int          abort_request;
-    //播放序列号
+    //播放序列号:队列的序号，每次跳转播放时间点 ，serial 就会 +1。
+    // 另一个数据结构 MyAVPacketList 里面也有一个 serial 字段。
+    /*
+     * 两个 serial 通过比较匹配,来丢弃无效的缓存帧，什么情况会导致队列的缓存帧无效？
+     * 跳转播放时间点的时候。
+     * 例如:
+     * 此时此刻，PacketQueue 队列里面缓存了 8 个帧，
+     * 但是这 8 个帧都 第30分钟 才开始播放的，
+     * 如果你通过 ➔ 按键前进到 第35分钟 的位置播放，那队列的 8 个缓存帧就无效了，需要丢弃。
+     * 由于每次跳转播放时间点， PacketQueue::serial 都会 +1 ，
+     * 而 MyAVPacketList::serial 的值还是原来的，两个 serial 不一样，就会丢弃帧。
+     * */
     int          serial;
-    //用于维持PacketQueue的多线程安全
+    //用于维持PacketQueue的多线程安全,主要用于修改队列的时候加锁。
     SDL_mutex    *mutex;
-    // 用于读、写线程相互通知，
+    // 用于读、写线程相互通知，用于 read_thread() 线程 跟 audio_thread() ，video_thread() 线程 进行通信的。
     SDL_cond     *cond;
 }               PacketQueue;
 
@@ -258,7 +270,7 @@ typedef struct Decoder {
     int            finished;
     //=0解码器处于异常状态，需要考虑重置解码器，=1解码器处于正常状态
     int            packet_pending;
-    // 检查到packet队列为空时,发送signal,缓存read_thread读取数据
+    // 检查到packet队列为空时,发送signal,缓存 read_thread 读取数据
     SDL_cond       *empty_queue_cond;
     // 初始化时是stream的start_time
     int64_t        start_pts;
@@ -807,6 +819,13 @@ static int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, S
     return 0;
 }
 
+/**
+ * 音视频和字母，都调用这个函数
+ * @param d
+ * @param frame
+ * @param sub
+ * @return
+ */
 static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
     printf("decoder_decode_frame() By : %s\n", SDL_GetThreadName(d->decoder_tid));
     int ret = AVERROR(EAGAIN);
@@ -855,8 +874,11 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
         }
 
         do {
-            if (d->queue->nb_packets == 0)
+            if (d->queue->nb_packets == 0) {
+                puts("给 empty_queue_cond 发一个信号");
                 SDL_CondSignal(d->empty_queue_cond);
+            }
+
             if (d->packet_pending) {
                 d->packet_pending = 0;
             } else {
@@ -1864,7 +1886,7 @@ static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial
 static void video_refresh(void *opaque, double *remaining_time) {
     VideoState *is = opaque;
     printf("video_refresh(): By :%s\n", SDL_GetThreadName(is->read_tid));
-    double     time;
+    double time;
 
     Frame *sp, *sp2;
 
@@ -2932,10 +2954,12 @@ static int stream_component_open(VideoState *is, int stream_index) {
     const char        *forced_codec_name = NULL;
     AVDictionary      *opts              = NULL;
     AVDictionaryEntry *t                 = NULL;
-    int               sample_rate, nb_channels;
-    int64_t           channel_layout;
-    int               ret                = 0;
-    int               stream_lowres      = lowres;
+
+    int     sample_rate, nb_channels;
+    int64_t channel_layout;
+    int     ret           = 0;
+    // 低分辨率
+    int     stream_lowres = lowres;
 
     if (stream_index < 0 || stream_index >= ic->nb_streams)
         return -1;
@@ -3108,11 +3132,21 @@ static int decode_interrupt_cb(void *ctx) {
     return is->abort_request;
 }
 
+/**
+ * 判断 AVPacket 是否够用，就是根据 size 来判断
+ *  主要就是确认 队列至少有 MIN_FRAMES 个帧，而且所有帧的播放时长加起来大于 1 秒钟。
+ * @param st
+ * @param stream_id
+ * @param queue
+ * @return
+ */
 static int stream_has_enough_packets(AVStream *st, int stream_id, PacketQueue *queue) {
-    return stream_id < 0 ||
-           queue->abort_request ||
-           (st->disposition & AV_DISPOSITION_ATTACHED_PIC) ||
-           queue->nb_packets > MIN_FRAMES && (!queue->duration || av_q2d(st->time_base) * queue->duration > 1.0);
+    return stream_id < 0 ||  // case 1:  参数ok ？；
+           queue->abort_request || // case 2: 退出 ？
+           (st->disposition & AV_DISPOSITION_ATTACHED_PIC) || // case 3 ： mp3 封面:
+           queue->nb_packets > MIN_FRAMES && (!queue->duration ||
+           // 而且所有帧的播放时长加起来大于 1 秒钟
+           av_q2d(st->time_base) * queue->duration > 1.0);
 }
 
 static int is_realtime(AVFormatContext *s) {
@@ -3186,6 +3220,7 @@ static int read_thread(void *arg) {
         av_dict_set(&format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
         scan_all_pmts_set = 1;
     }
+
     err = avformat_open_input(&ic, is->filename, is->iformat, &format_opts);
     if (err < 0) {
         print_error(is->filename, err);
@@ -3208,8 +3243,8 @@ static int read_thread(void *arg) {
     av_format_inject_global_side_data(ic);
 
     if (find_stream_info) {
-        AVDictionary **opts = setup_find_stream_info_opts(ic, codec_opts);
-        int orig_nb_streams = ic->nb_streams;
+        AVDictionary **opts          = setup_find_stream_info_opts(ic, codec_opts);
+        int          orig_nb_streams = ic->nb_streams;
 
         err = avformat_find_stream_info(ic, opts);
 
@@ -3264,6 +3299,7 @@ static int read_thread(void *arg) {
             if (avformat_match_stream_specifier(ic, st, wanted_stream_spec[type]) > 0)
                 st_index[type] = i;
     }
+
     for (i = 0; i < AVMEDIA_TYPE_NB; i++) {
         if (wanted_stream_spec[i] && st_index[i] == -1) {
             av_log(NULL, AV_LOG_ERROR, "Stream specifier %s does not match any %s stream\n", wanted_stream_spec[i],
@@ -3272,14 +3308,14 @@ static int read_thread(void *arg) {
         }
     }
 
-    if (!video_disable){
-        st_index[AVMEDIA_TYPE_VIDEO]    =
+    if (!video_disable) {
+        st_index[AVMEDIA_TYPE_VIDEO] =
                 av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO,
                                     st_index[AVMEDIA_TYPE_VIDEO], -1, NULL, 0);
     }
 
-    if (!audio_disable){
-        st_index[AVMEDIA_TYPE_AUDIO]    =
+    if (!audio_disable) {
+        st_index[AVMEDIA_TYPE_AUDIO] =
                 av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO,
                                     st_index[AVMEDIA_TYPE_AUDIO],
                                     st_index[AVMEDIA_TYPE_VIDEO],
@@ -3288,6 +3324,7 @@ static int read_thread(void *arg) {
     }
 
     if (!video_disable && !subtitle_disable)
+    {
         st_index[AVMEDIA_TYPE_SUBTITLE] =
                 av_find_best_stream(ic, AVMEDIA_TYPE_SUBTITLE,
                                     st_index[AVMEDIA_TYPE_SUBTITLE],
@@ -3295,6 +3332,9 @@ static int read_thread(void *arg) {
                                      st_index[AVMEDIA_TYPE_AUDIO] :
                                      st_index[AVMEDIA_TYPE_VIDEO]),
                                     NULL, 0);
+
+    }
+
 
     is->show_mode = show_mode;
     if (st_index[AVMEDIA_TYPE_VIDEO] >= 0) {
@@ -3307,17 +3347,23 @@ static int read_thread(void *arg) {
 
     /* open the streams */
     if (st_index[AVMEDIA_TYPE_AUDIO] >= 0) {
+        // 打开音频流
+        puts("打开音频流");
         stream_component_open(is, st_index[AVMEDIA_TYPE_AUDIO]);
     }
 
     ret = -1;
     if (st_index[AVMEDIA_TYPE_VIDEO] >= 0) {
+        // 打开视频流
+        puts("打开视频流");
         ret = stream_component_open(is, st_index[AVMEDIA_TYPE_VIDEO]);
     }
     if (is->show_mode == SHOW_MODE_NONE)
         is->show_mode = ret >= 0 ? SHOW_MODE_VIDEO : SHOW_MODE_RDFT;
 
     if (st_index[AVMEDIA_TYPE_SUBTITLE] >= 0) {
+        // 打开字幕流
+        puts("打开字幕流");
         stream_component_open(is, st_index[AVMEDIA_TYPE_SUBTITLE]);
     }
 
@@ -3336,14 +3382,21 @@ static int read_thread(void *arg) {
             break;
         if (is->paused != is->last_paused) {
             is->last_paused           = is->paused;
-            if (is->paused)
+            if (is->paused){
+                // av_read_pause .只对 播放网络流有效；有些流媒体协议支持暂停操作，
+                // 暂停了，服务器就不会再往 ffplay 推送数据，如果想重新推数据，需要调用 av_read_play()
                 is->read_pause_return = av_read_pause(ic);
-            else
+            }
+            else{
+                // av_read_pause() 和 av_read_play() 是网络流世界的 卧龙与凤雏，必然成对出现；
                 av_read_play(ic);
+            }
         }
+ //  rtsp 和 mmsh 协议
 #if CONFIG_RTSP_DEMUXER || CONFIG_MMSH_PROTOCOL
         if (is->paused &&
             (!strcmp(ic->iformat->name, "rtsp") ||
+              // strncmp(input_filename, "mmsh:", 5) : 拿input_filename的前5个字符串做比较
              (ic->pb && !strncmp(input_filename, "mmsh:", 5)))) {
             /* wait 10 ms to avoid trying to get another packet */
             /* XXX: horrible */
@@ -3393,13 +3446,17 @@ static int read_thread(void *arg) {
 
         /* if the queue are full, no need to read more */
         if (infinite_buffer < 1 &&
-            (is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE
-             || (stream_has_enough_packets(is->audio_st, is->audio_stream, &is->audioq) &&
+            (is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE||
+            // 判断 队列缓存中的 AVPacket 是否够用?
+            (stream_has_enough_packets(is->audio_st, is->audio_stream, &is->audioq) &&
                  stream_has_enough_packets(is->video_st, is->video_stream, &is->videoq) &&
-                 stream_has_enough_packets(is->subtitle_st, is->subtitle_stream, &is->subtitleq)))) {
+                 stream_has_enough_packets(is->subtitle_st, is->subtitle_stream, &is->subtitleq)
+                 ))) {
 
-            /* wait 10 ms */
+
+            /* 够用的话，就 wait 10 ms */
             SDL_LockMutex(wait_mutex);
+            // 等待10 ms, todo ,,, is->continue_read_thread 是能让   音频流，视频流，字幕流，3个read 线程都 wait 10ms 吗？
             SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
             SDL_UnlockMutex(wait_mutex);
             continue;
@@ -3416,6 +3473,9 @@ static int read_thread(void *arg) {
                 goto fail;
             }
         }
+        // 读取 avPacket
+        // 当 队列缓存中的 AVPacket 未满的时候，就会直接去读磁盘数据，把 AVPacket 读出来，
+        // 但是也不是读出来就会立即丢进去 PacketQueue 队列，而是会判断一下AVPacket 是否在期待的播放时间范围内
         ret = av_read_frame(ic, pkt);
         if (ret < 0) {
             if ((ret == AVERROR_EOF || avio_feof(ic->pb)) && !is->eof) {
@@ -3443,17 +3503,36 @@ static int read_thread(void *arg) {
         /* check if packet is in play range specified by user, then queue, otherwise discard */
         stream_start_time = ic->streams[pkt->stream_index]->start_time;
         pkt_ts            = pkt->pts == AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
+
+        //-------- 研究 rang time 算法-----start
+        // us
+        int64_t temp_start_time = (stream_start_time != AV_NOPTS_VALUE ? stream_start_time : 0);
+        // 时间基
+        int     temp_time_base  = av_q2d(ic->streams[pkt->stream_index]->time_base);
+        // 时间差
+        int     time_diff       = (pkt_ts - temp_start_time) * temp_time_base;
+        // 是否在 播放范围？
+        int     is_in_play_range   = time_diff <= ((double) duration / 1000000);
+        printf("        is_in_play_range : %d\n", is_in_play_range);
+        //-------- 研究 rang time 算法-----end
+
+        // 判断一下AVPacket 是否在期待的播放时间范围内
         pkt_in_play_range = duration == AV_NOPTS_VALUE ||
-                            (pkt_ts - (stream_start_time != AV_NOPTS_VALUE ? stream_start_time : 0)) *
-                            av_q2d(ic->streams[pkt->stream_index]->time_base) -
-                            (double) (start_time != AV_NOPTS_VALUE ? start_time : 0) / 1000000
-                            <= ((double) duration / 1000000);
+                            (pkt_ts - (stream_start_time != AV_NOPTS_VALUE ? stream_start_time : 0)) // step 1: 时间差
+                            *av_q2d(ic->streams[pkt->stream_index]->time_base) //step 2:  时间差 x time_base= 一个秒值
+                            -(double) (start_time != AV_NOPTS_VALUE ? start_time : 0) / 1000000 // step 3:  减去 start_time，得到一个差值
+                            <= ((double) duration / 1000000);// step 4:  这个差值和 duration 比较大小
+
+        // 下面的代码，主要围绕将 AVPacket 放进队列中
         if (pkt->stream_index == is->audio_stream && pkt_in_play_range) {
+            // AVPacket 放进 音频队列
             packet_queue_put(&is->audioq, pkt);
         } else if (pkt->stream_index == is->video_stream && pkt_in_play_range
                    && !(is->video_st->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+            // AVPacket 放进 视频队列
             packet_queue_put(&is->videoq, pkt);
         } else if (pkt->stream_index == is->subtitle_stream && pkt_in_play_range) {
+            // AVPacket 放进 字幕队列
             packet_queue_put(&is->subtitleq, pkt);
         } else {
             av_packet_unref(pkt);
@@ -3696,7 +3775,7 @@ static void event_loop(VideoState *cur_stream) {
     SDL_Event event;
     double    incr, pos, frac;
 
-      for (;;) {
+    for (;;) {
         double x;
         refresh_loop_wait_event(cur_stream, &event);
         switch (event.type) {
