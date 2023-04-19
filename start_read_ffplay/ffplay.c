@@ -2335,21 +2335,40 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
     return ret;
 }
 
+/**
+ *
+ * @param is
+ * @param afilters   :是滤镜字符串 ， 如："atempo=2.0"
+ * @param force_output_format
+ * @return
+ */
 static int configure_audio_filters(VideoState *is, const char *afilters, int force_output_format) {
+    puts("configure_audio_filters() : 配置音频滤镜.");
     static const enum AVSampleFormat sample_fmts[]           = {AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE};
 
-    int               sample_rates[2]         = {0, -1};
-    int64_t           channel_layouts[2]      = {0, -1};
-    int               channels[2]             = {0, -1};
+    // 定义了 一些只有 2 个元素的数组，这其实是 ffmpeg 项目传递参数的方式，
+    // 传递一个数组进去函数，主要有两种方式。
+    //  1:  传递数组的大小。就是有多少个元素。
+    //  2:  传递数组的结尾，只要读到结尾元素 (-1)，就算结束了。
+    int     sample_rates[2]    = {0, -1}; // ffmpeg 大部分函数采用的是第二种方式。
+    int64_t channel_layouts[2] = {0, -1}; // ffmpeg 大部分函数采用的是第二种方式。
+    int     channels[2]        = {0, -1}; // ffmpeg 大部分函数采用的是第二种方式。
+
     AVFilterContext   *filt_asrc              = NULL, *filt_asink = NULL;
     char              aresample_swr_opts[512] = "";
     AVDictionaryEntry *e                      = NULL;
     char              asrc_args[256];
     int               ret;
 
+    // is->agraph 一开始确实是 NULL，但是 configure_audio_filters() 这个函数可能会调用第二次，
+    // 第二次的时候 is->agraph 就不是 NULL了。
+    // configure_audio_filters()
+    // 第一次调用是在 stream_component_open() 里面
+    // 第二次调用是在 audio_thread()
     avfilter_graph_free(&is->agraph);
     if (!(is->agraph       = avfilter_graph_alloc()))
         return AVERROR(ENOMEM);
+    // 设置 滤镜使用的线程数量，0 为自动选择线程数量
     is->agraph->nb_threads = filter_nbthreads;
 
     while ((e = av_dict_get(swr_opts, "", e, AV_DICT_IGNORE_SUFFIX)))
