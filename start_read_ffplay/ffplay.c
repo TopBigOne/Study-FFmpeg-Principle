@@ -2888,11 +2888,14 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
             }
             is->audio_buf_index = 0;
         }
+
         len1     = is->audio_buf_size - is->audio_buf_index;
         if (len1 > len)
             len1 = len;
-        if (!is->muted && is->audio_buf && is->audio_volume == SDL_MIX_MAXVOLUME)
-            memcpy(stream, (uint8_t *) is->audio_buf + is->audio_buf_index, len1);
+        if (!is->muted && is->audio_buf && is->audio_volume == SDL_MIX_MAXVOLUME){
+            int temp_index =  is->audio_buf_index;
+            memcpy(stream, (uint8_t *) is->audio_buf + temp_index, len1);
+        }
         else {
             memset(stream, 0, len1);
             if (!is->muted && is->audio_buf)
@@ -2916,11 +2919,13 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
 /**
  * 调 SDL_OpenAudioDevice() 打开音频设备
  * NOTE: fplay 有两个处理音频的地方，一个是 滤镜（is->agraph），一个是重采样（is->swr_ctx）
- * @param opaque
- * @param wanted_channel_layout
- * @param wanted_nb_channels
- * @param wanted_sample_rate
- * @param audio_hw_params
+ * @param opaque  : 传递给 SDL 回调函数的参数
+ * @param wanted_channel_layout 希望用 这样的采样率，声道数，声道布局打开音频硬件设备。
+ * @param wanted_nb_channels   希望用 这样的采样率，声道数，声道布局打开音频硬件设备。
+ * @param wanted_sample_rate   希望用 这样的采样率，声道数，声道布局打开音频硬件设备。
+ * @param audio_hw_params       实际打开的音频硬件设备的音频格式信息
+ *  hw : 是 Hardware 的意思，也就是硬件，不过不是指硬件编解码加速，而是指打开的硬件设备。
+
  * @return
  */
 static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb_channels, int wanted_sample_rate,
@@ -2928,7 +2933,21 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
     puts("    audio_open() : 调 SDL_OpenAudioDevice() 打开音频设备");
     SDL_AudioSpec    wanted_spec, spec;
     const char       *env;
+    // next_nb_channels[]，这 其实是一个map表，声道切换映射表。举个例子，
+    // 如果音响设备不支持 7 声道的数据播放，肯定不能直接报错，
+    // 还要尝试一下其他声道能不能成功打开设备吧。
+    // 这个其他声道就是 next_nb_channels[]。
+    // next_nb_channels[7] = 6，从7声道切换到6声道打开音频设备
+    // next_nb_channels[6] = 4，从6声道切换到4声道打开音频设备
+    // next_nb_channels[5] = 6，从5声道切换到6声道打开音频设备
+    // next_nb_channels[4] = 2，从4声道切换到2声道打开音频设备
+    // next_nb_channels[3] = 6，从3声道切换到6声道打开音频设备
+    // next_nb_channels[2] = 1，从双声道切换到单声道打开音频设备
+    // next_nb_channels[1] = 0，单声道都打不开音频设备，无法再切换，需要降低采样率播放。
+    // next_nb_channels[0] = 0，0声道都打不开音频设备，无法再切换，需要降低采样率播放。
+
     static const int next_nb_channels[]   = {0, 0, 1, 6, 2, 6, 4, 6};
+   // 当切换所有声道都无法成功打开音频设备，就需要从 next_sample_rates[] 取一个比当前更小的采样率来尝试。
     static const int next_sample_rates[]  = {0, 44100, 48000, 96000, 192000};
     // 取 index=4的采样率
     int next_sample_rate_idx = FF_ARRAY_ELEMS(next_sample_rates) - 1;
@@ -2940,6 +2959,7 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
         wanted_nb_channels    = atoi(env);
         wanted_channel_layout = av_get_default_channel_layout(wanted_nb_channels);
     }
+    //  声道布局 跟 声道数是否一致，可能是担心用户在命令行输入错误的参数。
     if (!wanted_channel_layout || wanted_nb_channels != av_get_channel_layout_nb_channels(wanted_channel_layout)) {
         wanted_channel_layout = av_get_default_channel_layout(wanted_nb_channels);
         wanted_channel_layout &= ~AV_CH_LAYOUT_STEREO_DOWNMIX;
@@ -2956,7 +2976,9 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
         next_sample_rate_idx--;
     wanted_spec.format   = AUDIO_S16SYS;
     wanted_spec.silence  = 0;
+    // SDL_AUDIO_MAX_CALLBACKS_PER_SEC : 代表SDL 每秒调多少次回调函数
     wanted_spec.samples  = FFMAX(SDL_AUDIO_MIN_BUFFER_SIZE,
+                                 // 2 << 位移只是想把 样本数数量 变成 2 的指数。这是 SDL 文档建议的，
                                  2 << av_log2(wanted_spec.freq / SDL_AUDIO_MAX_CALLBACKS_PER_SEC));
     wanted_spec.callback = sdl_audio_callback;
     wanted_spec.userdata = opaque;
@@ -2966,6 +2988,7 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
                wanted_spec.channels, wanted_spec.freq, SDL_GetError());
         wanted_spec.channels = next_nb_channels[FFMIN(7, wanted_spec.channels)];
         if (!wanted_spec.channels) {
+            // next_sample_rate_idx--，表示降低采样率
             wanted_spec.freq     = next_sample_rates[next_sample_rate_idx--];
             wanted_spec.channels = wanted_nb_channels;
             if (!wanted_spec.freq) {
@@ -2991,6 +3014,7 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
     }
 
     audio_hw_params->fmt            = AV_SAMPLE_FMT_S16;
+    // 数量的音频样本占多少内存。也就是一秒钟要播放多少内存的音频数据。
     audio_hw_params->freq           = spec.freq;
     audio_hw_params->channel_layout = wanted_channel_layout;
     audio_hw_params->channels       = spec.channels;
@@ -3002,6 +3026,8 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
         av_log(NULL, AV_LOG_ERROR, "av_samples_get_buffer_size failed\n");
         return -1;
     }
+    // 指的是 SDL 内部音频数据缓存的大小，
+    // 代表 SDL线程执行 sdl_audio_callback() 的时候，SDL 硬件内部还有多少字节音频的数据没有播放。
     return spec.size;
 }
 
@@ -3182,6 +3208,7 @@ static int stream_component_open(VideoState *is, int stream_index) {
             }
             if ((ret = decoder_start(&is->auddec, audio_thread, "audio_decoder_thread", is)) < 0)
                 goto out;
+            // 启动音频设备，pause_on : 0;
             SDL_PauseAudioDevice(audio_dev, 0);
             break;
         case AVMEDIA_TYPE_VIDEO:
