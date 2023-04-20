@@ -787,6 +787,7 @@ static void packet_queue_start(PacketQueue *q) {
  * @return
  */
 static int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *serial) {
+    puts("packet_queue_get(): ");
     MyAVPacketList pkt1;
     int            ret;
 
@@ -840,7 +841,7 @@ static int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *seria
  * @return
  */
 static int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, SDL_cond *empty_queue_cond) {
-    puts("decoder_init()");
+    puts("decoder_init() ");
     printf("    decoder_init: %s : empty_queue_cond pointer address is : %p\n", d->decode_name, empty_queue_cond);
     memset(d, 0, sizeof(Decoder));
     d->pkt = av_packet_alloc();
@@ -863,7 +864,14 @@ static int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, S
  * @param d
  * @param frame
  * @param sub
- * @return
+ * @return  case 1 ： 返回 1，获取到 AVFrame
+ *          case 2 ： 返回 0 ，获取不到 AVFrame ，0 代表已经解码完MP4的所有AVPacket。
+ *                    这种情况一般是 ffplay 播放完了整个 MP4 文件，窗口画面停在最后一帧。
+ *                    但是由于你可以按 C 键重新循环播放，所以即便返回 0 也不能退出 audio_thread 线程。
+
+ *          case 2 ： 返回 -1，代表 PacketQueue 队列关闭了（abort_request）。
+ *                     返回 -1 会导致 audio_thread() 函数用 goto the_end 跳出 do{} while{} 循环，跳出循环之后，
+ *                     audio_thread 线程就会自己结束了。返回 -1 通常是因为关闭了 ffplay 播放器。
  */
 static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
     printf("decoder_decode_frame() By : %s\n", SDL_GetThreadName(d->decoder_tid));
@@ -873,8 +881,9 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
         //todo ?
         if (d->queue->serial == d->pkt_serial) {
             do {
-                if (d->queue->abort_request)
+                if (d->queue->abort_request) {
                     return -1;
+                }
 
                 switch (d->avctx->codec_type) {
                     case AVMEDIA_TYPE_VIDEO:
@@ -1032,12 +1041,12 @@ static void frame_queue_destory(FrameQueue *f) {
 }
 
 /**
- *发送唤醒信号
+ *
  * @param f
  */
 static void frame_queue_signal(FrameQueue *f) {
-    puts("发送唤醒信号");
     SDL_LockMutex(f->mutex);
+    printf("    frame_queue_signal() : 发送唤醒信号 f->cond pointer add is : %p\n",f->cond);
     SDL_CondSignal(f->cond);
     SDL_UnlockMutex(f->mutex);
 }
@@ -1076,26 +1085,44 @@ static Frame *frame_queue_peek_last(FrameQueue *f) {
 }
 
 /**
- * 获取可写帧，可以：以阻塞或⾮阻塞⽅式进⾏,
+ * 从 FrameQueue 里面取一个可以写的 Frame 出来 ，可以：以阻塞或⾮阻塞⽅式进⾏,
  * NOTE:向队列尾部申请一个可写的帧空间，若队列已满无空间可写，
  * 则等待（由SDL_cond *cond控制，由frame_queue_next或frame_queue_signal触发唤 醒）
  * @param f
  * @return
  */
 static Frame *frame_queue_peek_writable(FrameQueue *f) {
+    puts("frame_queue_peek_writable()");
     /* wait until we have space to put a new frame */
     SDL_LockMutex(f->mutex);
     while (f->size >= f->max_size && // 当前总帧数 >=可存储最大帧数
            !f->pktq->abort_request) // 用户没有退出请求
     {
+
+
+        printf("    frame_queue_peek_writable()-----------------------------------------------------------------------------------------------------------------| \n");
+        printf("    frame_queue_peek_writable() : SDL_CondWait 一会儿，FrameQueue 满了，需要被消耗，在线等，挺着急的.\n");
+        printf("    frame_queue_peek_writable() : f->cond pointer add is : %p\n",f->cond);
+        printf("    frame_queue_peek_writable() : f->size : %d ,f->max_size : %d \n", f->size, f->max_size);
+        printf("    frame_queue_peek_writable()-----------------------------------------------------------------------------------------------------------------| \n\n");
+
         // wo TM 等....等FrameQueue 的 queue 被消耗一些....
         SDL_CondWait(f->cond, f->mutex);
+        printf("    frame_queue_peek_writable()-----------------------------------------------------------------------------------------------------------------| \n");
+        printf("    frame_queue_peek_writable() : SDL_CondWait  收到了唤醒信号，FrameQueue 有空间了。\n");
+        printf("    frame_queue_peek_writable() : f->cond pointer add is : %p\n",f->cond);
+        printf("    frame_queue_peek_writable() : f->size : %d ,f->max_size : %d \n", f->size, f->max_size);
+        printf("    frame_queue_peek_writable()-----------------------------------------------------------------------------------------------------------------| \n\n");
+
     }
     SDL_UnlockMutex(f->mutex);
 
+
+
     // 用户退出了，直接返回NULL
-    if (f->pktq->abort_request)
+    if (f->pktq->abort_request) {
         return NULL;
+    }
     // 从队列中返回一个可写的Frame
     // 注意： 是队尾...是队尾...是队尾
     return &f->queue[f->windex];
@@ -1112,6 +1139,11 @@ static Frame *frame_queue_peek_readable(FrameQueue *f) {
     SDL_LockMutex(f->mutex);
     while (f->size - f->rindex_shown <= 0 &&
            !f->pktq->abort_request) {
+        printf("    frame_queue_peek_readable()---------------------------------------------------------------------------------| \n");
+        printf("    frame_queue_peek_readable() : SDL_CondWait 一会儿，FrameQueue 没数据了，需要被添加，在线等，挺着急的.\n");
+        printf("    frame_queue_peek_readable() : f->cond pointer add is : %p",f->cond);
+        printf("    frame_queue_peek_readable() : f->size : %d ,f->rindex_shown : %d \n", f->size, f->rindex_shown);
+        printf("    frame_queue_peek_readable()---------------------------------------------------------------------------------| \n\n");
         SDL_CondWait(f->cond, f->mutex);
     }
     SDL_UnlockMutex(f->mutex);
@@ -1124,17 +1156,25 @@ static Frame *frame_queue_peek_readable(FrameQueue *f) {
 
 /**
  * 更新写索引，此时Frame才真正⼊队列，队列节点Frame个数加1
- * 向队列尾部压入一帧，只更新计数与写指针，因此条用此函数前，应将帧数据写入队列相应位置，
+ * 向队列尾部压入一帧，只更新计数 与 写指针，
+ * 因此条用此函数前，应将帧数据写入队列相应位置，
+ *
  * SDL_CondSignal唤醒读frame_queue_peek_readable
  *
  * @param f
  */
 static void frame_queue_push(FrameQueue *f) {
-    if (++f->windex == f->max_size)
+    puts("frame_queue_push(): ");
+    if (++f->windex == f->max_size) {
         // 世界是一个圆，我又回到了最初的起点....
         f->windex = 0;
+    }
     SDL_LockMutex(f->mutex);
     f->size++;// 当前总帧数 + 1 todo 需要看看 这个size 在哪里被使用
+    printf("    frame_queue_push() ========================================================\n");
+    printf("    frame_queue_push() | 发送唤醒信号 f->cond pointer add is : %p\n",f->cond);
+    printf("    frame_queue_push() | f->size : %d ,f->max_size : %d \n", f->size, f->max_size);
+    printf("    frame_queue_push() ========================================================\n\n");
     SDL_CondSignal(f->cond);//当frame_queue_peek_readable在等待时，可唤醒
     SDL_UnlockMutex(f->mutex);
 }
@@ -1187,6 +1227,7 @@ static int64_t frame_queue_last_pos(FrameQueue *f) {
 }
 
 static void decoder_abort(Decoder *d, FrameQueue *fq) {
+    puts("decoder_abort(): ");
     packet_queue_abort(d->queue);
     frame_queue_signal(fq);
     SDL_WaitThread(d->decoder_tid, NULL);
@@ -1577,6 +1618,7 @@ static void video_audio_display(VideoState *s) {
 }
 
 static void stream_component_close(VideoState *is, int stream_index) {
+    puts("stream_component_close() ");
     AVFormatContext   *ic = is->ic;
     AVCodecParameters *codecpar;
 
@@ -1812,7 +1854,7 @@ static double get_master_clock(VideoState *is) {
             val = get_clock(&is->extclk);
             break;
     }
-    printf("get_master_clock() : val : %f", val);
+    printf("get_master_clock() \n   the current master clock value  : %f\n", val);
     return val;
 }
 
@@ -2146,6 +2188,7 @@ static void video_refresh(void *opaque, double *remaining_time) {
  * @return
  */
 static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double duration, int64_t pos, int serial) {
+    puts("queue_picture(): ");
     Frame *vp;
 
 #if defined(DEBUG_SYNC)
@@ -2180,6 +2223,7 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
 
     // 将src_frame中所有数据拷贝到vp->frame
     av_frame_move_ref(vp->frame, src_frame);
+    printf("    queue_picture() : current frame pts is : %f s.\n",vp->frame->pts* av_q2d(is->ic->streams[is->video_stream]->time_base));
     //更新写索引位置
     frame_queue_push(&is->pictq);
     return 0;
@@ -2365,14 +2409,14 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
 }
 
 /**
- *
+ * 创建音频滤镜函数
  * @param is
  * @param afilters   :是滤镜字符串 ， 如："atempo=2.0"
  * @param force_output_format
  * @return
  */
 static int configure_audio_filters(VideoState *is, const char *afilters, int force_output_format) {
-    puts("configure_audio_filters() : 配置音频滤镜.");
+    puts("configure_audio_filters() : 创建音频滤镜函数.");
     static const enum AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE};
 
     // 定义了 一些只有 2 个元素的数组，这其实是 ffmpeg 项目传递参数的方式，
@@ -3825,6 +3869,7 @@ static VideoState *stream_open(const char *filename, AVInputFormat *iformat) {
 }
 
 static void stream_cycle_channel(VideoState *is, int codec_type) {
+    puts("stream_cycle_channel(): ");
     AVFormatContext *ic        = is->ic;
     int             start_index, stream_index;
     int             old_index;
