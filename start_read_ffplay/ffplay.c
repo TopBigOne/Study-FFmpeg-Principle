@@ -116,7 +116,7 @@ static unsigned sws_flags = SWS_BICUBIC;
 typedef struct MyAVPacketList {
     // 解封装后的数据
     AVPacket *pkt;
-    // 播放序列
+    // 播放序列，它的值是 PacketQueue 里的 serial 赋值过来的；
     int      serial;
 }               MyAVPacketList;
 
@@ -143,7 +143,7 @@ typedef struct PacketQueue {
      * 例如:
      * 此时此刻，PacketQueue 队列里面缓存了 8 个帧，
      * 但是这 8 个帧都 第30分钟 才开始播放的，
-     * 如果你通过 ➔ 按键前进到 第35分钟 的位置播放，那队列的 8 个缓存帧就无效了，需要丢弃。
+     * 如果你通过 ➔ 按键前进到 第35分钟 的位置播放，那队列的 8 个缓存帧 就无效了，需要丢弃。
      * 由于每次跳转播放时间点， PacketQueue::serial 都会 +1 ，
      * 而 MyAVPacketList::serial 的值还是原来的，两个 serial 不一样，就会丢弃帧。
      * */
@@ -258,7 +258,7 @@ typedef struct FrameQueue {
 enum {
     AV_SYNC_AUDIO_MASTER, /* default choice */
     AV_SYNC_VIDEO_MASTER,/*按照视频同步*/
-    AV_SYNC_EXTERNAL_CLOCK, /* synchronize to an external clock */
+    AV_SYNC_EXTERNAL_CLOCK, /* synchronize to an external（外部时钟） clock */
 };
 
 /**
@@ -724,7 +724,7 @@ static void packet_queue_flush(PacketQueue *q) {
         // 往 AVFifoBuffer 里面读内存数据：把 （buffer）q->pkt_list 的数据 读到 pkt1 中
         // 实际，就是借用 AVPacket 释放buffer数据，这个十分巧妙，借刀杀人.....
         av_fifo_generic_read(q->pkt_list, &pkt1, sizeof(pkt1), NULL);
-        // free &pkt1.pkt
+        // free &pkt1.pkt ： AVPacket
         av_packet_free(&pkt1.pkt);
     }
     // 队列数据擦除
@@ -732,8 +732,9 @@ static void packet_queue_flush(PacketQueue *q) {
     q->size       = 0;
     q->duration   = 0;
 
+    // todo 让PacketQueue 和 MyAVPacketList 里的serial 出现不一致，便于做丢帧操作。
     q->serial++;
-    printf("packet_queue_flush() :after  (q->serial++) ,serial is %d\n: ",q->serial++);
+    printf("packet_queue_flush() :after  (q->serial++) ,serial is %d\n: ",q->serial);
     SDL_UnlockMutex(q->mutex);
 }
 
@@ -1008,11 +1009,12 @@ static void frame_queue_unref_item(Frame *vp) {
  * 初始化队列
  * @param f
  * @param pktq
- * @param max_size
+ * @param max_size  队列大小，视频是3, 音频是9；
  * @param keep_last
  * @return
  */
 static int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int keep_last) {
+    puts("frame_queue_init()");
     int i;
     memset(f, 0, sizeof(FrameQueue));
     // 创建 互斥锁
@@ -1028,6 +1030,7 @@ static int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int 
     f->pktq        = pktq;
     //队列大小
     f->max_size    = FFMIN(max_size, FRAME_QUEUE_SIZE);
+    printf("    frame_queue_init() Line number ：%d,\n   FrameQueue size is : %d\n ",__LINE__,f->max_size);
 
     // 将int取值的keep_last 转换 为bool取值（0或1）todo 神奇的代码.....
     f->keep_last = !!keep_last;
@@ -1074,7 +1077,8 @@ static void frame_queue_signal(FrameQueue *f) {
  * @return
  */
 static Frame *frame_queue_peek(FrameQueue *f) {
-    // todo 这个模运算是什么意思？ 是TM怕 数组越界？
+    // 模运算是是TM怕 数组越界
+    // 注意下标计算： f->rindex + f->rindex_shown
     return &f->queue[(f->rindex + f->rindex_shown) % f->max_size];
 }
 
@@ -1088,6 +1092,7 @@ static Frame *frame_queue_peek_next(FrameQueue *f) {
     puts("frame_queue_peek_next() : 获取下⼀Frame\n");
     //  获取当前帧的下一帧，此时要确保queue里面至少有2个frame
     // 靠，，，，这TM 不是队列，，，是直接操作数组，，好不好？
+    //  // 注意下标计算： f->rindex + f->rindex_shown+1
     return &f->queue[(f->rindex + f->rindex_shown + 1) % f->max_size];
 }
 
@@ -1204,21 +1209,30 @@ static void frame_queue_push(FrameQueue *f) {
 /**
  * 读取当前准备播放的帧的下一个帧
  * 更新读索引，此时Frame才真正出队列，队列节点Frame个数减1
- * case 1: 当启用keep_last时，如果rindex_shown为0则将其设置为1，并返回；
- * case 2: 此时并不会更新读索引，也就是说keep_last机制实质上也会占用着队列的大小，
- * case 3: 当调用frame_queue_nb_remaining获取size时并不能将其计算入size；释放Frame对应的数据，
- * 但不释放Frame节点本身；更新读索引；释放唤醒信号，以环形正在等待写入的线程。
+ * case 1: 当启用keep_last时，如果rindex_shown为0,则将其设置为1，并返回；
+ *         此时并不会更新读索引，也就是说keep_last机制实质上也会占用着队列的大小，
+ * case 2: 当调用frame_queue_nb_remaining获取size时并不能将其计算入size；
+ *          释放Frame对应的数据，
+ *          但不释放Frame节点本身；
+ *          更新读索引；
+ *          释放唤醒信号，
+ *          以环形正在等待写入的线程。
  * @param f
  */
 static void frame_queue_next(FrameQueue *f) {
     puts("frame_queue_next() : 更新读索引");
+    // case 1:
     if (f->keep_last && !f->rindex_shown) {
         f->rindex_shown = 1;
         return;
     }
     // 删除frame
     frame_queue_unref_item(&f->queue[f->rindex]);
+    printf("    frame_queue_next() rindex   : %d\n",f->rindex);
+    printf("    frame_queue_next() max_size : %d\n",f->max_size);
+    // case 2:
     // 世界还是一个圆，可读index回到当初变成0；
+    // FrameQueue 是一个数组，数组的下边是从0 开始的，所以最大的下标比
     if (++f->rindex == f->max_size)
     {
         f->rindex = 0;
@@ -1997,10 +2011,18 @@ static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial
     sync_clock_to_slave(&is->extclk, &is->vidclk);
 }
 
-/*
- * 读队列用法
+
+/**
+ *
+ * *有两个逻辑**:
+ * 第一：FrameQueue 队列无数据可读，取上一帧来渲染SDL窗口，通常是因为调整了窗口大小才会执行 video_display() 重新渲染。
+ * 第二: FrameQueue 队列有数据可读，就会跑进去 else{...} 的逻辑，peek 一个帧，看看是否可以播放，
+ *      如果可以播放，设置 is->force_refresh 为 1，然后再 执行 video_display() 渲染画面。
+ *
  * called to display each frame
- * */
+ * @param opaque           : VideoState
+ * @param remaining_time  : 要播放下一帧视频，还需要等待多少秒。或者说要过多久才去检查一下是否可以播放下一帧。
+ */
 static void video_refresh(void *opaque, double *remaining_time) {
     VideoState *is = opaque;
     printf("video_refresh(): By :%s\n", SDL_GetThreadName(is->read_tid));
@@ -2008,9 +2030,13 @@ static void video_refresh(void *opaque, double *remaining_time) {
 
     Frame *sp, *sp2;
 
+    // 外部时钟同步
     if (!is->paused && get_master_sync_type(is) == AV_SYNC_EXTERNAL_CLOCK && is->realtime)
+    {
         check_external_clock_speed(is);
+    }
 
+    // 音频波形显示
     if (!display_disable && is->show_mode != SHOW_MODE_VIDEO && is->audio_st) {
         time = av_gettime_relative() / 1000000.0;
         if (is->force_refresh || is->last_vis_time + rdftspeed < time) {
@@ -2020,13 +2046,15 @@ static void video_refresh(void *opaque, double *remaining_time) {
         *remaining_time = FFMIN(*remaining_time, is->last_vis_time + rdftspeed - time);
     }
 
+    // 播放视频画面
     if (is->video_st) {
+        // 重试啊......
         retry:
         // 帧队列是否为空
         if (frame_queue_nb_remaining(&is->pictq) == 0) {
             // nothing to do, no picture to display in the queue
             // 队列中没有图像可显示
-        } else {
+        } else { // 这个else ，会将 force_refresh= 1;
             double last_duration, duration, delay;
             Frame  *vp, *lastvp;
 
@@ -2036,6 +2064,7 @@ static void video_refresh(void *opaque, double *remaining_time) {
             // 读取待显示帧
             vp     = frame_queue_peek(&is->pictq);
 
+            // 当出现了序列号不一致，就不断地 retry，这样做把 无效的视频帧，统统丢掉；
             if (vp->serial != is->videoq.serial) {
                 // 如果不是最新的播放序列，则将其出队列，以尽快读取最新序列的帧
                 frame_queue_next(&is->pictq);
@@ -2047,8 +2076,8 @@ static void video_refresh(void *opaque, double *remaining_time) {
                 is->frame_timer = av_gettime_relative() / 1000000.0;
 
             if (is->paused) {
+                printf("    video_refresh() : 视频暂停is->paused");
                 goto display;
-                printf("视频暂停is->paused");
             }
 
 
@@ -2123,6 +2152,7 @@ static void video_refresh(void *opaque, double *remaining_time) {
 
                                 if (!SDL_LockTexture(is->sub_texture, (SDL_Rect *) sub_rect, (void **) &pixels,
                                                      &pitch)) {
+
                                     for (j = 0; j < sub_rect->h; j++, pixels += pitch)
                                         memset(pixels, 0, sub_rect->w << 2);
                                     SDL_UnlockTexture(is->sub_texture);
@@ -2141,15 +2171,27 @@ static void video_refresh(void *opaque, double *remaining_time) {
             /* 说明需要刷新视频帧 */
             is->force_refresh = 1;
 
-            if (is->step && !is->paused)
+            if (is->step && !is->paused) {
                 stream_toggle_pause(is);
+            }
+
         }
+        // 展示啊......
         display:
         /* display picture */
-        if (!display_disable && is->force_refresh && is->show_mode == SHOW_MODE_VIDEO && is->pictq.rindex_shown)
+        if (!display_disable && is->force_refresh
+        && is->show_mode == SHOW_MODE_VIDEO
+        && is->pictq.rindex_shown // 为了防止 FrameQueue 一帧数据都没有，就调了 video_display()。
+                ) {
+            // 负责把 视频帧 AVFrame 的数据渲染到 SDL_Texture（纹理）上面。
             video_display(is);// 重点是显示
+        }
+
     }
+
+    // force_refresh = 0 : 需要刷新画面
     is->force_refresh = 0;
+    // 打印音视频的同步信息到控制台上。（
     if (show_status) {
         AVBPrint       buf;
         static int64_t last_time;
@@ -2948,7 +2990,7 @@ static int audio_decode_frame(VideoState *is) {
         {
             return -1;
         }
-        printf("    audio_decode_frame() : 丢弃音频帧");
+        printf("    audio_decode_frame() : 丢弃音频帧\n");
         frame_queue_next(&is->sampq);
     } while (af->serial != is->audioq.serial);
 
@@ -4069,19 +4111,31 @@ static void toggle_audio_display(VideoState *is) {
     }
 }
 
+/**
+ * 如果没有键盘事件发生, refresh_loop_wait_event() 就不会返回，只会不断循环，不断去播放视频流的画面
+ * @param is
+ * @param event
+ */
 static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
+    puts("refresh_loop_wait_event()");
     double remaining_time = 0.0;
     SDL_PumpEvents();
+    // 不断地检查是否
     while (!SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT)) {
         if (!cursor_hidden && av_gettime_relative() - cursor_last_shown > CURSOR_HIDE_DELAY) {
             SDL_ShowCursor(0);
             cursor_hidden = 1;
         }
-        if (remaining_time > 0.0)
+        if (remaining_time > 0.0){
             av_usleep((int64_t) (remaining_time * 1000000.0));
+        }
+
         remaining_time = REFRESH_RATE;
-        if (is->show_mode != SHOW_MODE_NONE && (!is->paused || is->force_refresh))
+        if (is->show_mode != SHOW_MODE_NONE && (!is->paused || is->force_refresh)){
+            // 在video_refresh() 中，remaining_time 有可能被修改；
             video_refresh(is, &remaining_time);
+        }
+
         SDL_PumpEvents();
     }
 }
