@@ -10,7 +10,12 @@
 * av_fifo_space()
   * 判断 AVFifoBuffer 里面还有多少内存空间可以写？
 * av_fifo_generic_write()
-* 
+* av_usleep() 
+  > 函数的单位是微妙，也就是百万分之一 秒
+
+### 参数配置
+* -an 不解码音频
+
 
 
 

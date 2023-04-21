@@ -234,22 +234,24 @@ typedef struct Frame {
 typedef struct FrameQueue {
     //队列大小，数字太大时占用内存就会越大，需要注意设置
     Frame       queue[FRAME_QUEUE_SIZE];
-    //读索引，待播放时读取此帧进行播放，播放后此帧成为上一帧
+    // 读索引，这其实是用来读取上一帧已经播放的AVFrame的。
+    // rindex+rindex_shown，这个是用来读取下一个准备播放的 AVFrame 的
     int         rindex;
     //写索引
     int         windex;
-    //当前总帧数，todo ： 这个size 是 FrameQueue 的大小吗？ps: 这个大小是可变的。。。。
+    //当前总帧数，这个字段不是内存大小，而是个数，代表 当前队列已经缓存了多少个 Frame。
     int         size;
     //可存储最大帧数，是一个定值；
     int         max_size;
     //=1 说明要在队列里面保持最后一帧的数据不释放，只在销毁队列的时候才真正释放
-    // todo 为什么要keep last
+    //keep_last 代表 播放之后是否保存上一帧在队列里面不销毁
     int         keep_last;
     //初始化值为0，配合kepp_last=1使用
     int         rindex_shown;
+
     SDL_mutex   *mutex;
     SDL_cond    *cond;
-    // 数据包缓冲队列
+    // FrameQueue 的数据是从哪一个 PacketQueue 里来的。
     PacketQueue *pktq;
 }               FrameQueue;
 
@@ -363,7 +365,7 @@ typedef struct VideoState {
     //音视频同步类型，默认audio master
     int av_sync_type;
 
-    //当前音频帧的pts+当前帧Duration
+    //当前音频帧的pts + 当前帧Duration
     double audio_clock;
     // audio 播放序列，seek可改变此值
     // 只是一个用做临时用途的变量，实际上存储的就是 AVFrame 的 serial 字段。
@@ -392,6 +394,7 @@ typedef struct VideoState {
 
     //更新拷贝位置，当前音频帧中已拷贝入SDL音频缓冲区的位置索引
     int audio_buf_index; /* in bytes */
+
     //当前音频帧中尚未拷贝入SDL音频缓冲区的数据量
     int audio_write_buf_size;
     // 音量 大小
@@ -504,6 +507,7 @@ static int           borderless;
 static int           alwaysontop;
 static int           startup_volume                       = 100;
 static int           show_status                          = -1;
+/*按照 音频来同步音视频*/
 static int           av_sync_type                         = AV_SYNC_AUDIO_MASTER;
 static int64_t       start_time                           = AV_NOPTS_VALUE;
 static int64_t       duration                             = AV_NOPTS_VALUE;
@@ -1075,12 +1079,14 @@ static Frame *frame_queue_peek_next(FrameQueue *f) {
 }
 
 /**
- *获取上⼀Frame：
+ * 获取上⼀Frame： 注意，这里的 rindex.....
  * NOTE： 队列，是先进先出的。
  * @param f
  * @return
  */
 static Frame *frame_queue_peek_last(FrameQueue *f) {
+    puts("frame_queue_peek_last()");
+
     return &f->queue[f->rindex];
 }
 
@@ -1151,6 +1157,7 @@ static Frame *frame_queue_peek_readable(FrameQueue *f) {
     if (f->pktq->abort_request)
         return NULL;
 
+    // 注意这里的下标计算方式：f->rindex + f->rindex_shown
     return &f->queue[(f->rindex + f->rindex_shown) % f->max_size];
 }
 
@@ -1170,7 +1177,8 @@ static void frame_queue_push(FrameQueue *f) {
         f->windex = 0;
     }
     SDL_LockMutex(f->mutex);
-    f->size++;// 当前总帧数 + 1 todo 需要看看 这个size 在哪里被使用
+    // 当前总帧数 + 1 todo 需要看看 这个size 在哪里被使用
+    f->size++;
     printf("    frame_queue_push() ========================================================\n");
     printf("    frame_queue_push() | 发送唤醒信号 f->cond pointer add is : %p\n",f->cond);
     printf("    frame_queue_push() | f->size : %d ,f->max_size : %d \n", f->size, f->max_size);
@@ -1180,6 +1188,7 @@ static void frame_queue_push(FrameQueue *f) {
 }
 
 /**
+ * 读取当前准备播放的帧的下一个帧
  * 更新读索引，此时Frame才真正出队列，队列节点Frame个数减1
  * case 1: 当启用keep_last时，如果rindex_shown为0则将其设置为1，并返回；
  * case 2: 此时并不会更新读索引，也就是说keep_last机制实质上也会占用着队列的大小，
@@ -1217,8 +1226,11 @@ static int frame_queue_nb_remaining(FrameQueue *f) {
 
 /*
  * 获取最近播放Frame对应数据在媒体⽂件的位置，主要在seek时使⽤
+ * 获取当前播放到文件的那个位置，位置是内存数据的位置。例如 100M 的mp4，播放到了 50M。
+ *
  * return last shown position */
 static int64_t frame_queue_last_pos(FrameQueue *f) {
+    puts("frame_queue_last_pos()");
     Frame *fp = &f->queue[f->rindex];
     if (f->rindex_shown && fp->serial == f->pktq->serial)
         return fp->pos;
@@ -2802,11 +2814,19 @@ static void update_sample_display(VideoState *is, short *samples, int samples_si
     }
 }
 
-/* return the wanted number of samples to get better sync if sync_type is video
- * or external master clock */
+/**
+  * 用视频时钟为主时钟进行音视频同步，当音视频不同步的时候，就需要减少或增加音频帧的样本数量，
+ * 让音频流能拉长或者缩短，达到音频流能追赶视频流 或者减速慢下来等待视频流追上来 的效果
+ * return the wanted number of samples to get better sync if sync_type is video
+ * or external master clock
+ * @param is
+ * @param nb_samples  当前，音频帧，样本采样数
+ * @return
+ */
 static int synchronize_audio(VideoState *is, int nb_samples) {
     puts("synchronize_audio()");
     int wanted_nb_samples = nb_samples;
+    printf("    synchronize_audio() # wanted_nb_samples : %d\n",wanted_nb_samples);
 
     /* if not master, then we try to remove or add samples to correct the clock */
     if (get_master_sync_type(is) != AV_SYNC_AUDIO_MASTER) {
@@ -2850,6 +2870,9 @@ static int synchronize_audio(VideoState *is, int nb_samples) {
 }
 
 /**
+ * 从 FrameQueue 读取 AVFrame,
+ *然后 把 is->audio_buf 指针指向 AVFrame 的 data ，如果经过重采样， is->audio_buf 指针会指向重采样后的数据，也就是 is->audio_buf1。
+ *
  * Decode one audio frame and return its uncompressed size.
  *
  * The processed audio frame is decoded, converted if required, and
@@ -2861,6 +2884,7 @@ static int audio_decode_frame(VideoState *is) {
     int              data_size, resampled_data_size;
     int64_t          dec_channel_layout;
     av_unused double audio_clock0;
+    // 期望的：每一秒中，采样的音频数量
     int              wanted_nb_samples;
     Frame            *af;
 
@@ -2877,6 +2901,7 @@ static int audio_decode_frame(VideoState *is) {
             av_usleep (1000);
         }
 #endif
+             // 获取FrameQueue 队列中的Frame
         if (!(af = frame_queue_peek_readable(&is->sampq)))
         {
             return -1;
@@ -2884,6 +2909,8 @@ static int audio_decode_frame(VideoState *is) {
         printf("    audio_decode_frame() : 丢弃音频帧");
         frame_queue_next(&is->sampq);
     } while (af->serial != is->audioq.serial);
+
+
     printf("    audio_decode_frame() ------------------------------------------------------------------------------------------------------|\n");
     printf("    audio_decode_frame()  声道数#channels : %d ,每秒的采样次数#nb_samples : %d , format : %d\n",
            af->frame->channels,
@@ -2894,19 +2921,26 @@ static int audio_decode_frame(VideoState *is) {
     data_size = av_samples_get_buffer_size(NULL, af->frame->channels,
                                            af->frame->nb_samples,
                                            af->frame->format, 1);
-    printf("    audio_decode_frame() : sample    : %d.\n", av_get_bytes_per_sample(af->frame->format));
-    printf("    audio_decode_frame() : data_size : %d.\n", data_size);
+
+    printf("    audio_decode_frame() : sample      : %d.\n", av_get_bytes_per_sample(af->frame->format));
+    printf("    audio_decode_frame() : format_name : %s.\n", av_get_sample_fmt_name(af->frame->format));
+    printf("    audio_decode_frame() : data_size   : %d.\n", data_size);
 
     dec_channel_layout =
             (af->frame->channel_layout &&
              af->frame->channels == av_get_channel_layout_nb_channels(af->frame->channel_layout)) ?
             af->frame->channel_layout : av_get_default_channel_layout(af->frame->channels);
+
     wanted_nb_samples = synchronize_audio(is, af->frame->nb_samples);
+    printf("    audio_decode_frame() : wanted_nb_samples   : %d.\n", wanted_nb_samples);
 
     if (af->frame->format != is->audio_src.fmt ||
         dec_channel_layout != is->audio_src.channel_layout ||
         af->frame->sample_rate != is->audio_src.freq ||
-        (wanted_nb_samples != af->frame->nb_samples && !is->swr_ctx)) {
+        (wanted_nb_samples != af->frame->nb_samples // 用视频时钟为主时钟进行音视频同步，当音视频不同步的时候，就需要减少或增加音频帧的样本数量，让音频流能拉长或者缩短，达到音频流能追赶视频流 或者减速慢下来等待视频流追上来 的效果
+        && !is->swr_ctx)
+        ) {
+        printf("    audio_decode_frame() : af->frame->nb_samples   :  %d.\n", af->frame->nb_samples);
         swr_free(&is->swr_ctx);
         is->swr_ctx = swr_alloc_set_opts(NULL,
                                          is->audio_tgt.channel_layout, is->audio_tgt.fmt, is->audio_tgt.freq,
@@ -2984,16 +3018,28 @@ static int audio_decode_frame(VideoState *is) {
     return resampled_data_size;
 }
 
-/* prepare a new audio buffer */
+/**
+ * prepare a new audio buffer
+ *
+ * @param opaque
+ * @param stream 这个指针是 SDL 内部音频数据内存的指针，只要把数据拷贝到这个指针的地址，就能播放声音了。
+ * @param len  此次回调需要写多少字节的数据进去 stream 指针。
+ */
 static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
     puts("sdl_audio_callback()");
+
     VideoState *is = opaque;
     int        audio_size, len1;
+    printf("  sdl_audio_callback : len : %d\n",len);
+    printf("  sdl_audio_callback : is->audio_buf_size : %d\n",is->audio_buf_size);
 
     audio_callback_time      = av_gettime_relative();
 
+    // copy 音频数据
     while (len > 0) {
         if (is->audio_buf_index >= is->audio_buf_size) {
+
+            // 从 FrameQueue 读取 AVFrame
             audio_size          = audio_decode_frame(is);
             if (audio_size < 0) {
                 /* if error, just output silence */
@@ -3009,23 +3055,39 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
 
         len1     = is->audio_buf_size - is->audio_buf_index;
         if (len1 > len)
+        {
             len1 = len;
-        if (!is->muted && is->audio_buf && is->audio_volume == SDL_MIX_MAXVOLUME) {
+        }
+
+        // 复制音频数据到 SDL的内存
+        if (!is->muted && is->audio_buf
+        &&is->audio_volume == SDL_MIX_MAXVOLUME  // 以最大音量 copy
+        ) {
             int temp_index = is->audio_buf_index;
             memcpy(stream, (uint8_t *) is->audio_buf + temp_index, len1);
         } else {
             memset(stream, 0, len1);
-            if (!is->muted && is->audio_buf)
-                SDL_MixAudioFormat(stream, (uint8_t *) is->audio_buf + is->audio_buf_index, AUDIO_S16SYS, len1,
-                                   is->audio_volume);
+            if (!is->muted && is->audio_buf){
+                // 以调整后的音量copy
+                // SDL_MixAudioFormat() 函数有调整音量的功能。
+                SDL_MixAudioFormat(stream, (uint8_t *) is->audio_buf + is->audio_buf_index, AUDIO_S16SYS, len1,is->audio_volume);
+            }
         }
         len -= len1;
         stream += len1;
+        // 更新读取位置
         is->audio_buf_index += len1;
     }
+
+    //-------- 设置音频时钟--------
+    // 代表当前缓存里还剩多少数据没有拷贝给 SDL
+    //  当sdl 内部还剩下 audio_hw_buf_size 字节的时候，就会用回调，来取len 字节，
+    // 同时，我们的audio_buf 缓存还剩下audio_write_buf_size 字节，总共有三块内存等待播放，而这三块内存播放完以后的pts 就是 is->audio_clock;
+    // 如::  =======audio_hw_buf_size====len=====audio_write_buf_size===，这三块内存
     is->audio_write_buf_size = is->audio_buf_size - is->audio_buf_index;
     /* Let's assume the audio driver that is used by SDL has two periods. */
     if (!isnan(is->audio_clock)) {
+        // is->audio_clock 记录的是播放完那个 AVFrame 之后的 pts，但是此时此刻 只是把 这个 AVFrame 的内存数据拷贝给了 SDL，SDL 还没开始播放呢？
         set_clock_at(&is->audclk, is->audio_clock - (double) (2 * is->audio_hw_buf_size + is->audio_write_buf_size) /
                                                     is->audio_tgt.bytes_per_sec, is->audio_clock_serial,
                      audio_callback_time / 1000000.0);
@@ -3101,8 +3163,8 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
     wanted_spec.userdata = opaque;
     while (!(audio_dev = SDL_OpenAudioDevice(NULL, 0, &wanted_spec, &spec,
                                              SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE))) {
-        av_log(NULL, AV_LOG_WARNING, "SDL_OpenAudio (%d channels, %d Hz): %s\n",
-               wanted_spec.channels, wanted_spec.freq, SDL_GetError());
+        av_log(NULL, AV_LOG_WARNING, "SDL_OpenAudio (%d channels, %d Hz): %s\n",wanted_spec.channels, wanted_spec.freq, SDL_GetError());
+
         wanted_spec.channels = next_nb_channels[FFMIN(7, wanted_spec.channels)];
         if (!wanted_spec.channels) {
             // next_sample_rate_idx--，表示降低采样率
@@ -3116,6 +3178,9 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
         }
         wanted_channel_layout = av_get_default_channel_layout(wanted_spec.channels);
     }
+
+
+
     if (spec.format != AUDIO_S16SYS) {
         av_log(NULL, AV_LOG_ERROR,
                "SDL advised audio format %d is not supported!\n", spec.format);
