@@ -86,7 +86,7 @@ const int  program_birth_year = 2003;
 #define AV_SYNC_THRESHOLD_MAX 0.1
 /* If a frame duration is longer than this, it will not be duplicated to compensate AV sync */
 #define AV_SYNC_FRAMEDUP_THRESHOLD 0.1
-/* no AV correction is done if too big error */
+/* TMD ,这 还同步个屁啊....no AV correction is done if too big error */
 #define AV_NOSYNC_THRESHOLD 10.0
 
 /* maximum audio speed change to get correct sync */
@@ -175,16 +175,16 @@ typedef struct AudioParams {
 }               AudioParams;
 
 /**
- * Clock 时钟封装
+ * Clock 时钟封装,记录音频流，视频流当前播放到哪里的
  */
 typedef struct Clock {
-    //时钟基础, 当前帧(待播放)显示时间戳，播放后,当前帧变成上一帧
+    //时钟基础, 当前帧(待播放)显示时间戳，播放后,当前帧变成上一帧,时间是s:秒
     double pts;           /* clock base */
-    //当前pts与当前系统时钟的差值, audio、video对于该值是独立的
+    //当前 pts 与 当前系统时钟的差值, audio、video对于该值是独立的
     double pts_drift;     /* clock base minus time at which we updated the clock */
     //最后一次更新的系统时钟
     double last_updated;
-    //时钟速度控制，用于控制播放速度
+    // 时钟速度控制，用于控制播放速度
     double speed;
     // 播放序列，所谓播放序列就是一段连续的播放动作，一个seek操作会启动一段新的播放序列
     int    serial;           /* clock is based on a packet with this serial */
@@ -192,10 +192,14 @@ typedef struct Clock {
     int    paused;
     //指向packet_serial  :obsolete(废弃的), detection: 检测
     int    *queue_serial;    /* pointer to the current packet queue serial, used for obsolete clock detection */
-}               Clock;
+}     Clock;
 
-/* Common struct for handling all types of decoded data and allocated render buffers. */
-// Frame是音频、视频、字幕通用的结构体，AVFrame是真正存储解码后的音视频数据，存储字幕使用AVSubtitle
+
+
+/**
+ *  Frame是音频、视频、字幕通用的结构体，AVFrame是真正存储解码后的音视频数据，存储字幕使用AVSubtitle;
+ *  Common struct for handling all types of decoded data and allocated render buffers.
+ */
 typedef struct Frame {
     // 指向数据帧，音视频解码后的数据
     AVFrame    *frame;
@@ -446,6 +450,8 @@ typedef struct VideoState {
     // 记录最后一帧播放时间
     double frame_timer;
     double frame_last_returned_time;
+
+    // 滤镜容器处理上一帧所花的时间，这是一个预估值
     double frame_last_filter_delay;
     //视频流索引
     int    video_stream;
@@ -1828,11 +1834,26 @@ static double get_clock(Clock *c) {
     if (c->paused) {
         return c->pts;
     } else {
+        // av_gettime_relative() 获取当前的系统时间
         double time = av_gettime_relative() / 1000000.0;
+        printf("    get_clock() : OS time is : %f\n",time);
+
+        //  c->speed 默认是 1；
+        // 视频流当前的播放时刻 = 当前帧的 pts - 之前记录的系统时间 + 当前的系统时间
+        // 视频流当前的播放时刻 = 当前帧的 pts + 当前的系统时间    - 之前记录的系统时间
+        // 视频流当前的播放时刻 = 当前帧的 pts + 消逝的时间
+
         return c->pts_drift + time - (time - c->last_updated) * (1.0 - c->speed);
     }
 }
 
+/**
+ * 设置时钟相关参数。
+ * @param c      Clock: 音频时钟，或者 视频时钟，记录 current time ,这个多媒体流播放到哪里了.
+ * @param pts
+ * @param serial
+ * @param time
+ */
 static void set_clock_at(Clock *c, double pts, int serial, double time) {
     c->pts          = pts;
     c->last_updated = time;
@@ -1965,7 +1986,14 @@ static void step_to_next_frame(VideoState *is) {
     is->step = 1;
 }
 
+/**
+ *
+ * @param delay : 代表当前帧本来，本来需要显示多长时间。当前帧是 指 窗口正在显示的帧。
+ * @param is    : VideoState
+ * @return      : 还是返回一个delay，当前帧实际，实际应该显示多长时间,
+ */
 static double compute_target_delay(double delay, VideoState *is) {
+    puts("compute_target_delay() ") ;
     double sync_threshold, diff = 0;
 
     /* update delay to follow master synchronisation source */
@@ -1975,21 +2003,29 @@ static double compute_target_delay(double delay, VideoState *is) {
         diff = get_clock(&is->vidclk) - get_master_clock(is);
 
         /* skip or repeat frame. We take into account the
-           delay to compute the threshold. I still don't know
-           if it is the best guess */
+           delay to compute the threshold. I still don't know if it is the best guess */
+        // 同步阈值
         sync_threshold = FFMAX(AV_SYNC_THRESHOLD_MIN, FFMIN(AV_SYNC_THRESHOLD_MAX, delay));
+        printf("    compute_target_delay() # sync_threshold : %f\n",sync_threshold);
         if (!isnan(diff) && fabs(diff) < is->max_frame_duration) {
-            if (diff <= -sync_threshold)
+            // case 1: diff 是负数的时候，代表视频比音频慢了，通常会将 delay 置为 0，
+            if (diff <= -sync_threshold) {
                 delay = FFMAX(0, delay + diff);
-            else if (diff >= sync_threshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD)
+            }
+            // case 2: diff 大于阈值，并且，当前Frame需要显示的时间大于 0.1s;
+            else if (diff >= sync_threshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD) {
                 delay = delay + diff;
-            else if (diff >= sync_threshold)
+            }
+            // case 3: diff 是正数的时候，代表视频比音频快了，当超过阈值的时候，就会把 delay * 2
+            else if (diff >= sync_threshold) {
                 delay = 2 * delay;
+            }
         }
     }
 
     av_log(NULL, AV_LOG_TRACE, "video: delay=%0.3f A-V=%f\n", delay, -diff);
 
+   //  delay 代表  当前帧实际，实际应该显示多长时间。
     return delay;
 }
 
@@ -2005,7 +2041,15 @@ static double vp_duration(VideoState *is, Frame *vp, Frame *nextvp) {
     }
 }
 
+/**
+ * 更新视频时钟，记录那时候视频流播放到哪里了
+ * @param is
+ * @param pts
+ * @param pos
+ * @param serial
+ */
 static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial) {
+    puts("update_video_pts");
     /* update current video pts */
     set_clock(&is->vidclk, pts, serial);
     sync_clock_to_slave(&is->extclk, &is->vidclk);
@@ -2821,6 +2865,7 @@ static int video_thread(void *arg) {
             }
 
             is->frame_last_filter_delay     = av_gettime_relative() / 1000000.0 - is->frame_last_returned_time;
+
             if (fabs(is->frame_last_filter_delay) > AV_NOSYNC_THRESHOLD / 10.0)
                 is->frame_last_filter_delay = 0;
             tb = av_buffersink_get_time_base(filt_out);
@@ -2919,6 +2964,7 @@ static int synchronize_audio(VideoState *is, int nb_samples) {
         double diff, avg_diff;
         int    min_nb_samples, max_nb_samples;
 
+        // diff 只要小于 0 了，就代表视频比音频播放慢了
         diff = get_clock(&is->audclk) - get_master_clock(is);
 
         if (!isnan(diff) && fabs(diff) < AV_NOSYNC_THRESHOLD) {
@@ -3171,6 +3217,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
     is->audio_write_buf_size = is->audio_buf_size - is->audio_buf_index;
     /* Let's assume the audio driver that is used by SDL has two periods. */
     if (!isnan(is->audio_clock)) {
+        // 更新音频时钟
         // is->audio_clock 记录的是播放完那个 AVFrame 之后的 pts，但是此时此刻 只是把 这个 AVFrame 的内存数据拷贝给了 SDL，SDL 还没开始播放呢？
         set_clock_at(&is->audclk, is->audio_clock - (double) (2 * is->audio_hw_buf_size + is->audio_write_buf_size) /
                                                     is->audio_tgt.bytes_per_sec, is->audio_clock_serial,
