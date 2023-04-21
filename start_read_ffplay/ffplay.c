@@ -864,7 +864,7 @@ static int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, S
 }
 
 /**
- * 音视频和字母，都调用这个函数
+ * 音视频和字幕，都调用这个函数， 内部调用 avcodec_send_packet
  * @param d
  * @param frame
  * @param sub
@@ -882,7 +882,7 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
     int ret = AVERROR(EAGAIN);
 
     for (;;) {
-        //todo ?
+        //  队列serial 和 解码器serial 一致,可以接受 解码器处理出来的 AVFrame
         if (d->queue->serial == d->pkt_serial) {
             do {
                 if (d->queue->abort_request) {
@@ -916,7 +916,9 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                         }
                         break;
                 }
+
                 if (ret == AVERROR_EOF) {
+                    puts("      decoder_decode_frame() : 解码AVPacket 结束，");
                     d->finished = d->pkt_serial;
                     avcodec_flush_buffers(d->avctx);
                     return 0;
@@ -926,6 +928,8 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
             } while (ret != AVERROR(EAGAIN));
         }
 
+
+        // ======== 线程通信 start======
         do {
             if (d->queue->nb_packets == 0) {
                 puts("      decoder_decode_frame() : 给 empty_queue_cond 发一个信号，我这边 没有 AVPacket 了");
@@ -939,18 +943,26 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                 if (packet_queue_get(d->queue, d->pkt, 1, &d->pkt_serial) < 0)
                     return -1;
                 if (old_serial != d->pkt_serial) {
+                    // seek 了，所以,清空内部缓存的帧数据
                     avcodec_flush_buffers(d->avctx);
                     d->finished    = 0;
                     d->next_pts    = d->start_pts;
                     d->next_pts_tb = d->start_pts_tb;
                 }
             }
-            if (d->queue->serial == d->pkt_serial)
+            if (d->queue->serial == d->pkt_serial) {
+                puts("      decoder_decode_frame() : 队列serial 和 解码器serial 一致了，中断while ，着手解码 AVPacket了。");
                 break;
+            }
+
             av_packet_unref(d->pkt);
         } while (1);
+        // ======== 线程通信 end======
 
+        // 循环解码
         if (d->avctx->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+            puts("      decoder_decode_frame() : 解码字幕.");
+
             int got_frame = 0;
             ret = avcodec_decode_subtitle2(d->avctx, sub, &got_frame, d->pkt);
             if (ret < 0) {
@@ -963,6 +975,7 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
             }
             av_packet_unref(d->pkt);
         } else {
+            puts("      decoder_decode_frame() : 解码 音频和视频.");
             if (avcodec_send_packet(d->avctx, d->pkt) == AVERROR(EAGAIN)) {
                 av_log(d->avctx, AV_LOG_ERROR,
                        "Receive_frame and send_packet both returned EAGAIN, which is an API violation.\n");
@@ -1131,6 +1144,7 @@ static Frame *frame_queue_peek_writable(FrameQueue *f) {
     }
     // 从队列中返回一个可写的Frame
     // 注意： 是队尾...是队尾...是队尾
+    printf("    frame_queue_peek_writable() : windex is : %d\n",f->windex);
     return &f->queue[f->windex];
 }
 
@@ -2190,7 +2204,9 @@ static void video_refresh(void *opaque, double *remaining_time) {
 
 
 /**
- * 写队列用法
+ * 把经过 滤镜处理的 AVFrame 放进 FrameQueue,
+ * 链路如下：
+ * AVFrame-->Frame-->frame_queue_peek_writable()--->frame_queue_push() ---->
  * @param is
  * @param src_frame
  * @param pts
@@ -2208,7 +2224,8 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
            av_get_picture_type_char(src_frame->pict_type), pts);
 #endif
 
-    // //检测队列可写，获取可写Frame指针
+    // 检测队列可写，获取可写Frame指针
+    puts("  queue_picture() # 从 VideoState 获取 FrameQueue .");
     if (!(vp = frame_queue_peek_writable(&is->pictq))) {
         perror("队列已满.");
         return -1;
@@ -2241,18 +2258,31 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
     return 0;
 }
 
+/**
+ * 解码AVPacket ，获取链如下：
+ *   VideoState--->PacketQueue--->MyAVPacketList--->AVPacket
+ * @param is  VideoState
+ * @param frame  在video_thread() 函数里 malloc 的AVFrame；
+ * @return  解码后的 AVFrame
+ */
 static int get_video_frame(VideoState *is, AVFrame *frame) {
+    puts("get_video_frame()");
     int got_picture;
 
-    if ((got_picture = decoder_decode_frame(&is->viddec, frame, NULL)) < 0)
+    if ((got_picture = decoder_decode_frame(&is->viddec, frame, NULL)) < 0) {
         return -1;
+    }
+
 
     if (got_picture) {
         double dpts = NAN;
 
-        if (frame->pts != AV_NOPTS_VALUE)
+        if (frame->pts != AV_NOPTS_VALUE) {
             dpts = av_q2d(is->video_st->time_base) * frame->pts;
+        }
 
+
+        // sar
         frame->sample_aspect_ratio = av_guess_sample_aspect_ratio(is->ic, is->video_st, frame);
 
         if (framedrop > 0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) {
@@ -2653,8 +2683,15 @@ static int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name,
     return 0;
 }
 
+/**
+ * 从 PacketQueue videoq 队列拿 AVPacket，
+ * 然后丢给解码器解码，解码出来 AVFrame 之后，再把 AVFrame 丢到 FrameQueue 队列。
+ *  解码函数是 ： get_video_frame()
+ * @param arg  It is  VideoState;
+ * @return
+ */
 static int video_thread(void *arg) {
-    puts("video_thread : 从 PacketQueue videoq 队列拿 AVPacket，然后丢给解码器解码，解码出来 AVFrame 之后，再把 AVFrame 丢到 FrameQueue 队列。");
+    puts("video_thread()");
 
     VideoState *is        = arg;
     AVFrame    *frame     = av_frame_alloc();
@@ -2674,9 +2711,11 @@ static int video_thread(void *arg) {
     int                last_vfilter_idx = 0;
 #endif
 
-    if (!frame)
+    if (!frame){
         return AVERROR(ENOMEM);
+    }
 
+    puts("  video_thread# : 开始循环解码，实际调用 函数 ： get_video_frame()");
     for (;;) {
         ret = get_video_frame(is, frame);
         if (ret < 0)
@@ -2721,6 +2760,8 @@ static int video_thread(void *arg) {
             frame_rate       = av_buffersink_get_frame_rate(filt_out);
         }
 
+
+        puts("  video_thread# : 将avframe 交给滤镜)");
         ret = av_buffersrc_add_frame(filt_in, frame);
         if (ret < 0)
             goto the_end;
@@ -2728,6 +2769,7 @@ static int video_thread(void *arg) {
         while (ret >= 0) {
             is->frame_last_returned_time = av_gettime_relative() / 1000000.0;
 
+            puts("      video_thread# : 从buffersink 中 取出滤镜 处理好的avframe)");
             ret = av_buffersink_get_frame_flags(filt_out, frame, 0);
             if (ret < 0) {
                 if (ret == AVERROR_EOF)
@@ -2763,7 +2805,7 @@ static int video_thread(void *arg) {
 }
 
 static int subtitle_thread(void *arg) {
-    puts("subtitle_thread: 字幕线程");
+    puts("subtitle_thread() : 字幕线程");
     VideoState *is = arg;
     Frame      *sp;
     int        got_subtitle;
