@@ -557,7 +557,8 @@ static SDL_AudioDeviceID audio_dev;
 static const struct TextureFormatEntry {
     enum AVPixelFormat format;
     int                texture_fmt;
-}                        sdl_texture_format_map[] = {
+}
+sdl_texture_format_map[] = {
         {AV_PIX_FMT_RGB8,           SDL_PIXELFORMAT_RGB332},
         {AV_PIX_FMT_RGB444,         SDL_PIXELFORMAT_RGB444},
         {AV_PIX_FMT_RGB555,         SDL_PIXELFORMAT_RGB555},
@@ -582,6 +583,13 @@ static const struct TextureFormatEntry {
 
 #if CONFIG_AVFILTER
 
+/**
+ * 处理 -vf 命令行参数的
+ * @param optctx
+ * @param opt
+ * @param arg
+ * @return
+ */
 static int opt_add_vfilter(void *optctx, const char *opt, const char *arg) {
     GROW_ARRAY(vfilters_list, nb_vfilters);
     vfilters_list[nb_vfilters - 1] = arg;
@@ -2434,18 +2442,20 @@ static int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
 }
 
 static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const char *vfilters, AVFrame *frame) {
+    puts("configure_video_filters()");
     enum AVPixelFormat pix_fmts[FF_ARRAY_ELEMS(sdl_texture_format_map)];
     char               sws_flags_str[512] = "";
     char               buffersrc_args[256];
-    int                ret;
-    AVFilterContext    *filt_src          = NULL, *filt_out = NULL, *last_filter = NULL;
-    AVCodecParameters  *codecpar          = is->video_st->codecpar;
-    AVRational         fr                 = av_guess_frame_rate(is->ic, is->video_st, NULL);
-    AVDictionaryEntry  *e                 = NULL;
-    int                nb_pix_fmts        = 0;
-    int                i, j;
+    int               ret;
+    AVFilterContext   *filt_src   = NULL, *filt_out = NULL, *last_filter = NULL;
+    AVCodecParameters *codecpar   = is->video_st->codecpar;
+    AVRational        fr          = av_guess_frame_rate(is->ic, is->video_st, NULL);
+    AVDictionaryEntry *e          = NULL;
+    int               nb_pix_fmts = 0;
+    int               i, j;
 
-    for (i                = 0; i < renderer_info.num_texture_formats; i++) {
+    // ffmpeg 像素格式到 SDL 像素格式的映射过程，
+    for (i = 0; i < renderer_info.num_texture_formats; i++) {
         for (j = 0; j < FF_ARRAY_ELEMS(sdl_texture_format_map) - 1; j++) {
             if (renderer_info.texture_formats[i] == sdl_texture_format_map[j].texture_fmt) {
                 pix_fmts[nb_pix_fmts++] = sdl_texture_format_map[j].format;
@@ -4270,8 +4280,11 @@ static void event_loop(VideoState *cur_stream) {
                     case SDLK_w:
 #if CONFIG_AVFILTER
                         if (cur_stream->show_mode == SHOW_MODE_VIDEO && cur_stream->vfilter_idx < nb_vfilters - 1) {
-                            if (++cur_stream->vfilter_idx >= nb_vfilters)
+                            // ++cur_stream->vfilter_idx  : 做了递增操作；
+                            if (++cur_stream->vfilter_idx >= nb_vfilters){
                                 cur_stream->vfilter_idx = 0;
+                            }
+
                         } else {
                             cur_stream->vfilter_idx = 0;
                             toggle_audio_display(cur_stream);

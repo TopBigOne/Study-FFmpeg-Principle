@@ -20,6 +20,11 @@
 
 
 
+### 脚本
+```shell
+ffplay  -x 400 -vf "drawtext=fontsize=60:fontfile=FreeSerif.ttf:text='Good night':x=W-w:y=60" -vf "drawtext=fontsize=60w:fontfile=FreeSerif.ttf:text='Good morning':x=150:y=100" -i "/Users/dev/Desktop/mp4/金莎-爱的魔法.mp4"
+```
+
 
 ### 读码参考
 * [ffplay.c源码分析](https://www.cnblogs.com/juju-go/p/16489044.html)
