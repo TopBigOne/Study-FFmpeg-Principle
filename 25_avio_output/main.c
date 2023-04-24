@@ -47,6 +47,7 @@ int init_input_ffmpeg() {
     avformat_find_stream_info(input_av_format_context, NULL);
 
     decode_AVCodecContext = avcodec_alloc_context3(NULL);
+
     avcodec_parameters_to_context(decode_AVCodecContext, input_av_format_context->streams[0]->codecpar);
 
     AVCodec *avCodec = avcodec_find_decoder(decode_AVCodecContext->codec_id);
@@ -72,6 +73,8 @@ int init_output_ffmpeg() {
     st = avformat_new_stream(output_av_format_ctx, NULL);
     // 给输出流设置 time base
     st->time_base = input_av_format_context->streams[0]->time_base;
+
+    set_output_avformat_ctx();
 
 
     return result;
@@ -226,8 +229,6 @@ int start_decode() {
 
             // case 3:
             if (result >= 0) {
-                set_output_avformat_ctx();
-
                 result = avcodec_send_frame(encode_ctx, input_av_frame);
 
                 if (result < 0) {
@@ -271,7 +272,7 @@ int start_decode() {
 }
 
 void set_output_packet_time_base() {
-   //  puts("set_output_packet_time_base()");
+    //  puts("set_output_packet_time_base()");
     out_av_packet->stream_index             = st->index;
     // 转换AVPacket的 time base 为输出流的time base
     AVRational      input_ctx_time_base     = input_av_format_context->streams[0]->time_base;
