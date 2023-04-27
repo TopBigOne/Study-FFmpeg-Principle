@@ -24,10 +24,12 @@ int open_input(AVFormatContext **ctx, char *in_filename) {
     AVCodecContext *avCodecContext = avcodec_alloc_context3(NULL);
 
     avcodec_parameters_to_context(avCodecContext, ctx[0]->streams[0]->codecpar);
-    uint8_t *extra_data  = avCodecContext->extradata;
-    int     extra_result = extra_data[4] & 0x1f;
-    printf("extra_result : %d\n", extra_result);
-
+    uint8_t  *extra_data = avCodecContext->extradata;
+    for (int i           = 0; i < 100; ++i) {
+        if ((extra_data[i] & 0x1f) == 7 || (extra_data[i] & 0x1f) == 8) {
+            printf("extra_result extra_data[%d] : %d\n", i, extra_data[i] & 0x1f);
+        }
+    }
     return ret;
 }
 
@@ -42,15 +44,15 @@ int open_output(FILE **file, char *out_filename) {
     return ret;
 }
 
-int write_output(FILE *of, AVPacket *pkt) {
+int write_output(FILE *fp, AVPacket *pkt) {
     if (pkt->size > 0) {
-        size_t size = fwrite(pkt->data, 1, pkt->size, of);
+        size_t size = fwrite(pkt->data, sizeof(uint8_t), pkt->size, fp);
         if (size <= 0) {
             fprintf(stderr, "fwrite failed\n");
             return -1;
-        } else {
-            fprintf(stdout, "write packet, size=%d\n", size);
         }
+        fprintf(stdout, "write packet, size=%zd\n", size);
+
     }
     return 0;
 }
@@ -85,7 +87,7 @@ int filter_stream(AVBSFContext *bsf_ctx, AVPacket *pkt, FILE *of, int eof) {
     int ret = 0;
     ret = av_bsf_send_packet(bsf_ctx, eof ? NULL : pkt) < 0;
     if (ret) {
-        fprintf(stderr, "av_bsf_send_packet failed, ret=%d\n", ret);
+        fprintf(stderr, "av bsf send packet failed, ret=%d\n", ret);
         return ret;
     }
     while ((ret = av_bsf_receive_packet(bsf_ctx, pkt) == 0)) {
