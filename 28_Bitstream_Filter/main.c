@@ -19,6 +19,15 @@ int open_input(AVFormatContext **ctx, char *in_filename) {
         fprintf(stderr, "find stream info failed\n");
         return ret;
     }
+
+
+    AVCodecContext *avCodecContext = avcodec_alloc_context3(NULL);
+
+    avcodec_parameters_to_context(avCodecContext, ctx[0]->streams[0]->codecpar);
+    uint8_t *extra_data  = avCodecContext->extradata;
+    int     extra_result = extra_data[4] & 0x1f;
+    printf("extra_result : %d\n", extra_result);
+
     return ret;
 }
 
@@ -120,6 +129,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "open_input failed, ret=%d\n", ret);
         goto end;
     }
+
     if ((ret = open_output(&of, out_filename)) < 0) {
         fprintf(stderr, "open_output failed, ret=%d\n", ret);
         goto end;
@@ -129,7 +139,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ifmt_ctx->nb_streams; i++) {
         if (ifmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
             video_stream_index = i;
-            is_annexb          = strcmp(av_fourcc2str(ifmt_ctx->streams[i]->codecpar->codec_tag), "avc1") == 0 ? 0 : 1;
+            char *codec_tag = av_fourcc2str(ifmt_ctx->streams[i]->codecpar->codec_tag);
+            is_annexb = strcmp(codec_tag, "avc1") == 0 ? 0 : 1;
             break;
         }
     }
@@ -142,7 +153,7 @@ int main(int argc, char **argv) {
     fprintf(stdout, "is_annexb=%d\n", is_annexb);
 
     if (!is_annexb) {
-        if (ret = open_bitstream_filter(ifmt_ctx->streams[video_stream_index], &bsf_ctx, "h264_mp4toannexb") < 0) {
+        if ((ret = open_bitstream_filter(ifmt_ctx->streams[video_stream_index], &bsf_ctx, "h264_mp4toannexb")) < 0) {
             fprintf(stderr, "open_bitstream_filter failed, ret=%d\n", ret);
             goto end;
         }
@@ -150,9 +161,10 @@ int main(int argc, char **argv) {
 
     while (av_read_frame(ifmt_ctx, pkt) >= 0) {
         if (pkt->stream_index != video_stream_index) {
-            fprintf(stdout, "read a packet, not a video frame\n");
+            av_packet_unref(pkt);
             continue;
         }
+
         if (is_annexb) {
             ret = write_output(of, pkt);
         } else {
@@ -161,13 +173,13 @@ int main(int argc, char **argv) {
         if (ret < 0) {
             goto end;
         }
-
-
         av_packet_unref(pkt);
     }
+
     if (!is_annexb) {//flush bistream filter
         filter_stream(bsf_ctx, NULL, of, 1);
     }
+
 
     end:
     if (pkt != NULL)
