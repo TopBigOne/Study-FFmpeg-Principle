@@ -6,7 +6,7 @@ set(FFMPEG_DIR /opt/homebrew/Cellar/ffmpeg/4.4.1_4)
 include_directories(${FFMPEG_DIR}/include/)
 link_directories(${FFMPEG_DIR}/lib)
 
-add_executable(27_parse_h264_NAL_with_mp4 other_code.c)
+add_executable(27_parse_h264_NAL_with_mp4 main.c)
 
 target_link_libraries(
         27_parse_h264_NAL_with_mp4
