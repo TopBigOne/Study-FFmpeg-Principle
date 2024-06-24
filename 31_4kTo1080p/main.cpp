@@ -21,6 +21,8 @@ int convert_video3(const char *input_filename, const char *output_filename);
 
 int convert_video4(const char *input_filename, const char *output_filename);
 
+int convert_video2_400_300(const char *input_filename, const char *output_filename);
+
 
 #define PRINT_STEP_ERROR(stepError) \
     do {\
@@ -194,9 +196,11 @@ int main() {
     auto *output2 = "/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/31_4kTo1080p/doc/result_mono_2.mp4";
     auto *output3 = "/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/31_4kTo1080p/doc/result_mono_3.mp4";
     auto *output4 = "/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/31_4kTo1080p/doc/result_mono_4.mp4";
+    auto *output5 = "/Users/dev/Documents/Android_work/main_ffmpeg/FFmpeg-Principle/31_4kTo1080p/doc/result_mono_5.mp4";
 
-    convert_video4(input, output4);
-    //  convert_video3(input, output3);
+    //convert_video4(input, output4);
+    //convert_video2_400_300(input, output5);
+      convert_video3(input, output3);
     // convert_video2(input, output2);
     //  convert_video(input, output);
     return 0;
