@@ -1792,8 +1792,10 @@ static void set_default_window_size(int width, int height, AVRational sar) {
     SDL_Rect rect;
     int      max_width  = screen_width ? screen_width : INT_MAX;
     int      max_height = screen_height ? screen_height : INT_MAX;
-    if (max_width == INT_MAX && max_height == INT_MAX)
+    if (max_width == INT_MAX && max_height == INT_MAX) {
         max_height = height;
+    }
+
     calculate_display_rect(&rect, 0, 0, max_width, max_height, width, height, sar);
     default_width  = rect.w;
     default_height = rect.h;
