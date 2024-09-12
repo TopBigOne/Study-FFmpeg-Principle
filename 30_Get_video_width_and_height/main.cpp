@@ -9,7 +9,41 @@ extern "C" {
 }
 
 //#define  fileName  "/Volumes/Disk2/Downloads/20240910_141706.mp4"
-#define  fileName  "/Users/dev/Desktop/yu_fan/ori_20240910_141706.mp4"
+//#define  fileName  "/Users/dev/Desktop/yu_fan/ori_20240910_141706.mp4"
+#define  fileName  "/Users/dev/Desktop/yu_fan/flv_格雷西西西_別聽悲傷的歌.flv"
+
+
+/**
+ * 获取视频总时长：s
+ * @return
+ */
+double getVideoDuration() {
+    puts(__func__);
+    AVFormatContext *formatContext = avformat_alloc_context();
+    if (!formatContext) {
+        // 处理内存分配错误
+        return -1;
+    }
+
+    if (avformat_open_input(&formatContext, fileName, nullptr, nullptr) != 0) {
+        // 处理打开文件错误
+        return -1;
+    }
+
+    if (avformat_find_stream_info(formatContext, nullptr) < 0) {
+        // 处理查找流信息错误
+        return -1;
+    }
+
+    int64_t duration = formatContext->duration / AV_TIME_BASE; // 将微秒转换为秒
+
+    avformat_close_input(&formatContext);
+
+    // 输出视频时长
+    std::cout << "视频文件总时长为: " << duration << " 秒" << std::endl;
+    return duration;
+
+}
 
 
 double get_rotation(AVStream *st) {
@@ -25,7 +59,7 @@ double get_rotation(AVStream *st) {
             theta = 0;
     }
     if (displaymatrix && !theta)
-        theta =-av_display_rotation_get(reinterpret_cast<int32_t *>(displaymatrix));
+        theta                        = -av_display_rotation_get(reinterpret_cast<int32_t *>(displaymatrix));
 
     theta -= 360 * floor(theta / 360 + 0.9 / 360);
 
@@ -132,6 +166,7 @@ int checkVideoInfo() {
 int main() {
 
     checkVideoInfo();
+    getVideoDuration();
 
 
     return 0;
