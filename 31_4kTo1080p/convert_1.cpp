@@ -10,6 +10,36 @@ extern "C" {
 
 #include <iostream>
 
+
+/*
+ * GWt /chat HTTP/1.t
+ * Host: www.baidu.com
+ * Upgrade:websocket
+ * connection: Upgrade
+ * sec-socket-key:dsfdsf==
+ * sec-socket-version:13
+ * Origin : www.tencent.com
+ * sec-socket-Protocol:chat ,superchat
+ * sec-socket-Extension:sfdsr
+ *
+ *
+ * */
+
+/**
+ * websocket 的body
+ */
+typedef struct ws_body {
+    uint8_t  fin: 1;
+    uint8_t  rsv1: 1;
+    uint8_t  rsv2: 1;
+    uint8_t  rsv3: 1;
+    uint8_t  opcode: 4; // 0x08:close,0x09:ping ;0xa:pong
+    uint8_t  mask: 1;
+    uint8_t  pay_load_length: 7;
+    uint32_t masing_key;
+    uint8_t  *pay_load_data;// core data;
+};
+
 void convert_video2(const char *input_filename, const char *output_filename) {
     av_register_all();
 
