@@ -12,8 +12,6 @@ set(CMAKE_C_STANDARD 99)
 set(ffmpeg_prefix "/usr/local/ffmpeg/4.4")
 set(ffmpeg_exec_prefix "${ffmpeg_prefix}")
 set(libdir "${ffmpeg_exec_prefix}/lib")
-set(FFMPEG_PREFIX "/usr/local/Cellar/ffmpeg/4.1.3")
-set(FFMPEG_EXEC_PREFIX "/usr/local/Cellar/ffmpeg/4.1.3")
 set(FFMPEG_LIBDIR "${ffmpeg_exec_prefix}/lib")
 set(FFMPEG_INCLUDE_DIRS "${ffmpeg_prefix}/include/")
 
